@@ -1,1 +1,1 @@
-obj-m += file_copy.o
+obj-m += gs_mem.o
