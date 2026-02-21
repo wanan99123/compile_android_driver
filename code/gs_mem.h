@@ -10,7 +10,8 @@
 #include <linux/sched.h>
 #include <linux/pid.h>
 #include <linux/netlink.h>
-#include <linux/net_namespace.h>
+#include <net/net_namespace.h>
+#include <net/netlink.h>
 #include <asm/io.h>
 #include <linux/highmem.h>
 #include <linux/uaccess.h>
@@ -23,7 +24,7 @@ struct process_info {
     size_t virt_addr;
     size_t len;
     void __user *base;
-    int type; // 0=读物理 1=写物理
+    int type;
 };
 
 extern struct sock *nl_sk;
