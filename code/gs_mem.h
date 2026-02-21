@@ -10,6 +10,7 @@
 #include <linux/sched.h>
 #include <linux/pid.h>
 #include <linux/netlink.h>
+#include <linux/net_namespace.h>
 #include <asm/io.h>
 #include <linux/highmem.h>
 #include <linux/uaccess.h>
