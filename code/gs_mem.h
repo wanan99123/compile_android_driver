@@ -2,6 +2,7 @@
 #define GS_MEM_H
 
 #include <linux/types.h>
+#include <linux/version.h>
 
 #define NETLINK_CUSTOM_PROTOCOL 20
 #define MAX_ADDR_LEN 256
