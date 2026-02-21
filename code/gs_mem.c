@@ -2,92 +2,136 @@
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Jayne");
-MODULE_DESCRIPTION("一个通过Netlink调用内核模块实现内核级物理内存读取的简单示例");
+MODULE_DESCRIPTION("Netlink 内核物理内存读写");
 MODULE_VERSION("0.1");
 
-// 接收Netlink消息的回调函数
-static void nl_recv_msg(struct sk_buff *skb) {
-    struct nlmsghdr *nlh;
-    int pid;
-    int send_pid;
-    size_t virt_addr;
-    phys_addr_t phys_addr;
-    void *kernel_addr = NULL;
-    size_t len;
-    struct mm_struct *mm;
-    void *base;
-    int type;
-    char kernel_module_name[MAX_ADDR_LEN];
-    uintptr_t ptr;
-    ssize_t ret;
+#define NETLINK_CUSTOM_PROTOCOL 31
 
-    nlh = (struct nlmsghdr *)skb->data;
+struct sock *nl_sk = NULL;
+struct netlink_kernel_cfg cfg = {
+    .input = NULL,
+};
 
-    send_pid = nlh->nlmsg_pid; // 发送方进程的PID
+phys_addr_t translate_linear_address(struct mm_struct *mm, uintptr_t va)
+{
+    pgd_t *pgd;
+    p4d_t *p4d;
+    pud_t *pud;
+    pmd_t *pmd;
+    pte_t *pte;
 
-    // 解析虚拟地址和偏移量
-    process_info_data = (struct process_info *)nlmsg_data(nlh);
+    phys_addr_t page_addr;
+    uintptr_t page_offset;
 
-    pid = process_info_data->pid;
-    len = process_info_data->len;
-    base = process_info_data->base;
-    type = process_info_data->type;
+    if (!mm)
+        return 0;
 
-    mm = get_mm_by_pid(pid);
+    pgd = pgd_offset(mm, va);
+    if (pgd_none(*pgd) || pgd_bad(*pgd))
+        return 0;
 
-    if (!mm) {
-        printk(KERN_ERR "v2p: 获取mm 出错\n");
-        return;
-    }
-    mmput(mm);
+    p4d = p4d_offset(pgd, va);
+    if (p4d_none(*p4d) || p4d_bad(*p4d))
+        return 0;
 
-    if (type == 2) {
-        ret = copy_from_user(kernel_module_name, process_info_data->module_name, sizeof(kernel_module_name));
-        ptr = get_module_base(mm, kernel_module_name);
-        printk(KERN_INFO "v2p name: %s,ptr: %lx\n", kernel_module_name, ptr);
-        ret = copy_to_user(base, &ptr, len);
-        return;
-    }
+    pud = pud_offset(p4d, va);
+    if (pud_none(*pud) || pud_bad(*pud))
+        return 0;
 
-    virt_addr = process_info_data->virt_addr;
+    pmd = pmd_offset(pud, va);
+    if (pmd_none(*pmd) || pmd_bad(*pmd))
+        return 0;
 
-    phys_addr = translate_linear_address(mm, virt_addr);
+    pte = pte_offset_kernel(pmd, va);
+    if (!pte || pte_none(*pte) || !pte_present(*pte))
+        return 0;
 
-    if (type == 0) {
-        read_phys_addr(base, phys_addr, kernel_addr, len);
-    } else if (type == 1) {
-        write_phys_addr(base, phys_addr, kernel_addr, len);
-    }
+    page_addr = (phys_addr_t)(pte_pfn(*pte) << PAGE_SHIFT);
+    page_offset = va & (PAGE_SIZE - 1);
+    return page_addr + page_offset;
 }
 
-// 模块初始化函数
-static int __init netlink_virt_to_phys_init(void) {
-    printk(KERN_INFO "v2p: Loading netlink_virt_to_phys module...\n");
+void read_phys_addr(void __user *base, phys_addr_t phys_addr, size_t len)
+{
+    void *kernel_addr;
 
-    cfg.input = nl_recv_msg;
+    if (!base || !phys_addr || !len)
+        return;
 
-    nl_sk = netlink_kernel_create(&init_net, NETLINK_CUSTOM_PROTOCOL, &cfg);
-    if (!nl_sk) {
-        printk(KERN_ALERT "v2p: Error creating socket.\n");
-        return -10;
+    if (!pfn_valid(__phys_to_pfn(phys_addr)))
+        return;
+
+    kernel_addr = ioremap_cache(phys_addr, len);
+    if (!kernel_addr)
+        return;
+
+    copy_to_user(base, kernel_addr, len);
+    iounmap(kernel_addr);
+}
+
+void write_phys_addr(void __user *base, phys_addr_t phys_addr, size_t len)
+{
+    void *kernel_addr;
+
+    if (!base || !phys_addr || !len)
+        return;
+
+    if (!pfn_valid(__phys_to_pfn(phys_addr)))
+        return;
+
+    kernel_addr = ioremap_cache(phys_addr, len);
+    if (!kernel_addr)
+        return;
+
+    copy_from_user(kernel_addr, base, len);
+    iounmap(kernel_addr);
+}
+
+static void nl_recv_msg(struct sk_buff *skb)
+{
+    struct nlmsghdr *nlh = nlmsg_hdr(skb);
+    struct process_info *info = nlmsg_data(nlh);
+    struct mm_struct *mm;
+    phys_addr_t pa;
+
+    if (!info)
+        return;
+
+    mm = get_mm_by_pid(info->pid);
+    if (!mm) {
+        pr_err("v2p: get_mm_by_pid failed\n");
+        return;
     }
 
-    // 隐藏模块
-    struct module *mod = THIS_MODULE;
-    list_del_init(&mod->list);
-    kobject_del(&mod->mkobj.kobj);
-    mod->sect_attrs = NULL;
-    mod->notes_attrs = NULL;
+    pa = translate_linear_address(mm, info->virt_addr);
+
+    if (info->type == 0)
+        read_phys_addr(info->base, pa, info->len);
+    else if (info->type == 1)
+        write_phys_addr(info->base, pa, info->len);
+
+    mmput(mm);
+}
+
+static int __init gs_mem_init(void)
+{
+    pr_info("v2p: module loaded\n");
+
+    cfg.input = nl_recv_msg;
+    nl_sk = netlink_kernel_create(&init_net, NETLINK_CUSTOM_PROTOCOL, &cfg);
+    if (!nl_sk) {
+        pr_err("v2p: netlink create failed\n");
+        return -ENOMEM;
+    }
 
     return 0;
 }
 
-// 模块卸载函数
-static void __exit netlink_virt_to_phys_exit(void) {
-    printk(KERN_INFO "v2p: Unloading netlink_virt_to_phys module...\n");
-
+static void __exit gs_mem_exit(void)
+{
+    pr_info("v2p: module unloaded\n");
     netlink_kernel_release(nl_sk);
 }
 
-module_init(netlink_virt_to_phys_init);
-module_exit(netlink_virt_to_phys_exit);
+module_init(gs_mem_init);
+module_exit(gs_mem_exit);
