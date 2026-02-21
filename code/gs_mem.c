@@ -1,194 +1,239 @@
-#include "gs_mem.h"
 #include <linux/init.h>
 #include <linux/netlink.h>
 #include <linux/skbuff.h>
-#include <net/net_namespace.h>
-#include <net/netlink.h>
-#include <linux/sched/mm.h>
-#include <linux/module.h>
-#include <linux/kernel.h>
+#include <linux/vmalloc.h>
+#include <linux/mm.h>
+#include <net/sock.h>
 #include <linux/file.h>
-#include <linux/mman.h>
+#include <linux/fdtable.h>
+#include <linux/fs_struct.h>
+#include <linux/mount.h>
+#include <linux/ptrace.h>
+#include <linux/slab.h>
+#include <linux/seq_file.h>
+#include <linux/sched/mm.h>
+#include <linux/kernel.h>
+#include <linux/module.h>
+#include <linux/cdev.h>
+#include <linux/fs.h>
+#include <linux/device.h>
+#include <linux/kallsyms.h>
+#include <linux/kprobes.h>
+#include <linux/highmem.h>
+#include <linux/io.h> // 适配 6.x：memremap
+
+#include "gs_mem.h"
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Jayne");
-MODULE_DESCRIPTION("Full compat physmem v2p");
+MODULE_DESCRIPTION("适配 Linux 6.x 内核的内存读写模块");
 MODULE_VERSION("1.0");
 
-struct sock *nl_sk = NULL;
+static struct sock *nl_sk = NULL;
+static struct netlink_kernel_cfg cfg;
 static struct process_info *process_info_data;
 
+static inline struct mm_struct *get_mm_by_pid(pid_t nr);
 static inline struct mm_struct *get_mm_by_pid(pid_t nr)
 {
     struct task_struct *task;
-    struct mm_struct *mm = NULL;
 
-    rcu_read_lock();
     task = pid_task(find_vpid(nr), PIDTYPE_PID);
-    if (task)
-        mm = get_task_mm(task);
-    rcu_read_unlock();
+    if (!task)
+        return NULL;
 
-    return mm;
+    return get_task_mm(task);
 }
 
-uintptr_t get_module_base(struct mm_struct *mm, const char *name)
+uintptr_t get_module_base(struct mm_struct* mm, char* name);
+
+uintptr_t get_module_base(struct mm_struct* mm, char* name) 
 {
     struct vm_area_struct *vma;
-    char buf[256];
-    const char *path;
 
-    if (!mm || !name)
-        return 0;
-
-    mmap_read_lock(mm);
     for (vma = mm->mmap; vma; vma = vma->vm_next) {
-        if (!vma->vm_file)
-            continue;
+        char buf[MAX_ADDR_LEN];
+        char *path_nm = "";
 
-        path = file_path(vma->vm_file, buf, sizeof(buf)-1);
-        if (!strcmp(kbasename(path), name)) {
-            uintptr_t ret = vma->vm_start;
-            mmap_read_unlock(mm);
-            return ret;
+        if (vma->vm_file) {
+            path_nm = file_path(vma->vm_file, buf, MAX_ADDR_LEN-1);
+            if (!strcmp(kbasename(path_nm), name)) {
+                return vma->vm_start;
+            }
         }
     }
-    mmap_read_unlock(mm);
     return 0;
 }
 
-phys_addr_t translate_linear_address(struct mm_struct *mm, uintptr_t va)
-{
+phys_addr_t translate_linear_address(struct mm_struct* mm, uintptr_t va);
+
+phys_addr_t translate_linear_address(struct mm_struct* mm, uintptr_t va) {
+
     pgd_t *pgd;
     p4d_t *p4d;
-    pud_t *pud;
     pmd_t *pmd;
     pte_t *pte;
-
-    if (!mm)
-        return 0;
-
+    pud_t *pud;
+	
+    phys_addr_t page_addr;
+    uintptr_t page_offset;
+    
     pgd = pgd_offset(mm, va);
-    if (pgd_none(*pgd) || pgd_bad(*pgd))
+    if(pgd_none(*pgd) || pgd_bad(*pgd)) {
         return 0;
-
+    }
     p4d = p4d_offset(pgd, va);
-    if (p4d_none(*p4d) || p4d_bad(*p4d))
+    if (p4d_none(*p4d) || p4d_bad(*p4d)) {
+    	return 0;
+    }
+	pud = pud_offset(p4d,va);
+	if(pud_none(*pud) || pud_bad(*pud)) {
         return 0;
-
-    pud = pud_offset(p4d, va);
-    if (pud_none(*pud) || pud_bad(*pud))
+    }
+	pmd = pmd_offset(pud,va);
+	if(pmd_none(*pmd)) {
         return 0;
-
-    pmd = pmd_offset(pud, va);
-    if (pmd_none(*pmd) || pmd_bad(*pmd))
+    }
+	pte = pte_offset_kernel(pmd,va);
+	if(pte_none(*pte)) {
         return 0;
-
-    pte = pte_offset_kernel(pmd, va);
-    if (!pte || pte_none(*pte) || !pte_present(*pte))
+    }
+	if(!pte_present(*pte)) {
         return 0;
-
-    return (phys_addr_t)pte_pfn(*pte) << PAGE_SHIFT | (va & ~PAGE_MASK);
+    }
+	page_addr = (phys_addr_t)(pte_pfn(*pte) << PAGE_SHIFT);
+	page_offset = va & (PAGE_SIZE-1);
+	
+	return page_addr + page_offset;
 }
 
-void read_phys_addr(void __user *base, phys_addr_t phys_addr, size_t len)
-{
-    void *kaddr;
-    unsigned long ret;
-
-    if (!base || !phys_addr || !len)
+void read_phys_addr(void *base,phys_addr_t phys_addr,void* kernel_addr,size_t len);
+void read_phys_addr(void *base,phys_addr_t phys_addr,void* kernel_addr,size_t len){
+    if (!phys_addr) {
+        printk(KERN_ERR "v2p: read_phys_addr获取phys_addr 出错\n");
         return;
+    }
 
-    if (!pfn_valid(__phys_to_pfn(phys_addr)))
+    if (!pfn_valid(__phys_to_pfn(phys_addr))) {
         return;
+    }
 
-    kaddr = ioremap_cache(phys_addr, len);
-    if (!kaddr)
+    // 适配 6.x：使用 memremap 替代 ioremap_cache
+    kernel_addr = memremap(phys_addr, len, MEMREMAP_WB);
+
+    if(!kernel_addr){
+        printk(KERN_ERR "v2p: read_phys_addr获取 kernel_addr 出错\n");
         return;
-
-    ret = copy_to_user(base, kaddr, len);
-    (void)ret;
-
-    iounmap(kaddr);
+    }
+    
+    if(copy_to_user(base, kernel_addr, len)) {
+        memunmap(kernel_addr); // 适配 6.x：使用 memunmap
+        return;
+    }
+    memunmap(kernel_addr); // 适配 6.x：使用 memunmap
 }
 
-void write_phys_addr(void __user *base, phys_addr_t phys_addr, size_t len)
-{
-    void *kaddr;
-    unsigned long ret;
-
-    if (!base || !phys_addr || !len)
+void write_phys_addr(void *base,phys_addr_t phys_addr,void* kernel_addr,size_t len);
+void write_phys_addr(void *base,phys_addr_t phys_addr,void* kernel_addr,size_t len){
+    if (!phys_addr) {
+        printk(KERN_ERR "v2p: write_phys_addr获取phys_addr 出错\n");
         return;
+    }
 
-    if (!pfn_valid(__phys_to_pfn(phys_addr)))
+    if (!pfn_valid(__phys_to_pfn(phys_addr))) {
         return;
+    }
 
-    kaddr = ioremap_cache(phys_addr, len);
-    if (!kaddr)
+    // 适配 6.x：使用 memremap 替代 ioremap_cache
+    kernel_addr = memremap(phys_addr, len, MEMREMAP_WB);
+
+    if(!kernel_addr){
+        printk(KERN_ERR "v2p: write_phys_addr获取 kernel_addr 出错\n");
         return;
-
-    ret = copy_from_user(kaddr, base, len);
-    (void)ret;
-
-    iounmap(kaddr);
+    }
+    
+    if(copy_from_user(kernel_addr, base, len)) {
+        memunmap(kernel_addr); // 适配 6.x：使用 memunmap
+        return;
+    }
+    memunmap(kernel_addr); // 适配 6.x：使用 memunmap
 }
 
-static void nl_recv_msg(struct sk_buff *skb)
-{
-    struct nlmsghdr *nlh = nlmsg_hdr(skb);
-    struct process_info *info = nlmsg_data(nlh);
+static void nl_recv_msg(struct sk_buff *skb) {
+    struct nlmsghdr *nlh;
+    int pid;
+    int send_pid;
+    size_t virt_addr;
+    phys_addr_t phys_addr;
+    void* kernel_addr = NULL;
+    size_t len;
     struct mm_struct *mm;
-    phys_addr_t pa;
-    uintptr_t mod_base;
+    void *base;
+    int type;
+    char kernel_module_name[MAX_ADDR_LEN];
+    uintptr_t ptr;
+	ssize_t ret;
 
-    if (!info)
-        return;
+    nlh = (struct nlmsghdr *)skb->data;
 
-    mm = get_mm_by_pid(info->pid);
+    send_pid = nlh->nlmsg_pid;
+
+    process_info_data = (struct process_info *)nlmsg_data(nlh);
+
+    pid = process_info_data->pid;
+    len = process_info_data->len;
+    base = process_info_data->base;
+    type = process_info_data->type;
+
+    mm = get_mm_by_pid(pid);
+
     if (!mm) {
-        pr_err("v2p: get mm failed\n");
+        printk(KERN_ERR "v2p: 获取mm 出错\n");
         return;
     }
-
-    if (info->type == 2) {
-        mod_base = get_module_base(mm, info->module_name);
-        pr_info("v2p: %s base = %lx\n", info->module_name, mod_base);
-        copy_to_user(info->base, &mod_base, info->len);
-        mmput(mm);
-        return;
-    }
-
-    pa = translate_linear_address(mm, info->virt_addr);
-
-    if (info->type == 0)
-        read_phys_addr(info->base, pa, info->len);
-    else if (info->type == 1)
-        write_phys_addr(info->base, pa, info->len);
-
     mmput(mm);
+
+    if(type == 2){
+        ret = copy_from_user(kernel_module_name, process_info_data->module_name, 
+                sizeof(kernel_module_name));
+        ptr = get_module_base(mm,kernel_module_name);
+        printk(KERN_INFO "v2p name: %s,ptr: %lx\n",kernel_module_name,ptr);
+        ret = copy_to_user(base, &ptr, len);
+        return;
+    }
+
+    virt_addr = process_info_data->virt_addr;
+
+    phys_addr = translate_linear_address(mm,virt_addr);
+
+    if(type == 0){
+        read_phys_addr(base,phys_addr,kernel_addr,len);
+    }else if(type == 1){
+        write_phys_addr(base,phys_addr,kernel_addr,len);
+    }
 }
 
-static int __init gs_mem_init(void)
-{
-    struct netlink_kernel_cfg cfg = {
-        .input = nl_recv_msg,
-    };
+static int __init netlink_virt_to_phys_init(void) {
 
-    nl_sk = netlink_kernel_create(&init_net, NETLINK_CUSTOM_PROTOCOL, &cfg);
+    printk(KERN_INFO "v2p: Loading netlink_virt_to_phys module...\n");
+
+    cfg.input = nl_recv_msg;
+
+    // 适配 6.x：使用 __netlink_kernel_create 替代旧接口
+    nl_sk = __netlink_kernel_create(&init_net, NETLINK_CUSTOM_PROTOCOL, THIS_MODULE, &cfg);
     if (!nl_sk) {
-        pr_err("netlink create failed\n");
-        return -ENOMEM;
+        printk(KERN_ALERT "v2p: Error creating socket.\n");
+        return -10;
     }
 
-    pr_info("gs_mem loaded\n");
     return 0;
 }
 
-static void __exit gs_mem_exit(void)
-{
+static void __exit netlink_virt_to_phys_exit(void) {
+    printk(KERN_INFO "v2p: Unloading netlink_virt_to_phys module...\n");
+
     netlink_kernel_release(nl_sk);
-    pr_info("gs_mem unloaded\n");
 }
 
-module_init(gs_mem_init);
-module_exit(gs_mem_exit);
+module_init(netlink_virt_to_phys_init);
+module_exit(netlink_virt_to_phys_exit);
