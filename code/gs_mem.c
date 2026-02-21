@@ -1,286 +1,230 @@
-#include <linux/init.h>
-#include <linux/netlink.h>
-#include <linux/skbuff.h>
-#include <linux/vmalloc.h>
-#include <linux/mm.h>
-#include <net/sock.h>
-#include <linux/file.h>
-#include <linux/fdtable.h>
-#include <linux/fs_struct.h>
-#include <linux/mount.h>
-#include <linux/ptrace.h>
-#include <linux/slab.h>
-#include <linux/seq_file.h>
-#include <linux/sched/mm.h>
-#include <linux/kernel.h>
-#include <linux/module.h>
-#include <linux/cdev.h>
-#include <linux/fs.h>
-#include <linux/device.h>
-#include <linux/kallsyms.h>
-#include <linux/kprobes.h>
-#include <linux/highmem.h>
-#include <linux/version.h>
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
-#include <linux/io.h>
-#endif
-
 #include "gs_mem.h"
 
-MODULE_LICENSE("GPL");
-MODULE_AUTHOR("Jayne");
-MODULE_DESCRIPTION("通用兼容的内存读写模块");
-MODULE_VERSION("1.0");
+#include <linux/module.h>
+#include <linux/fs.h>
+#include <linux/miscdevice.h>
+#include <linux/slab.h>
+#include <linux/uaccess.h>
+#include <linux/dcache.h>
+#include <linux/rwsem.h>
+#include <linux/sched/mm.h>
+#include <linux/sched/task.h>
+#include <linux/version.h>
+#include <linux/string.h>
 
-static struct sock *nl_sk = NULL;
-static struct netlink_kernel_cfg cfg;
-static struct process_info *process_info_data;
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 8, 0)
+#define mmap_read_lock(mm)    down_read(&(mm)->mmap_sem)
+#define mmap_read_unlock(mm)  up_read(&(mm)->mmap_sem)
+#endif
 
-static inline struct mm_struct *get_mm_by_pid(pid_t nr);
-static inline struct mm_struct *get_mm_by_pid(pid_t nr)
+#define ARC_PATH_MAX 256
+#define DEVICE_NAME "TearGame"
+
+uintptr_t get_module_base(pid_t pid, char *name)
 {
+    struct pid *pid_struct;
     struct task_struct *task;
-
-    task = pid_task(find_vpid(nr), PIDTYPE_PID);
-    if (!task)
-        return NULL;
-
-    return get_task_mm(task);
-}
-
-uintptr_t get_module_base(struct mm_struct* mm, char* name);
-
-uintptr_t get_module_base(struct mm_struct* mm, char* name) 
-{
+    struct mm_struct *mm;
     struct vm_area_struct *vma;
+    uintptr_t base_addr = 0;
 
-    for (vma = mm->mmap; vma; vma = vma->vm_next) {
-        char buf[MAX_ADDR_LEN];
-        char *path_nm = "";
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0))
+    struct vma_iterator vmi;
+#endif
 
+    pid_struct = find_get_pid(pid);
+    if (!pid_struct)
+        return 0;
+
+    task = get_pid_task(pid_struct, PIDTYPE_PID);
+    put_pid(pid_struct);
+    if (!task)
+        return 0;
+
+    mm = get_task_mm(task);
+    put_task_struct(task);
+    if (!mm)
+        return 0;
+
+    mmap_read_lock(mm);
+
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0))
+    vma_iter_init(&vmi, mm, 0);
+    for_each_vma(vmi, vma)
+#else
+    for (vma = mm->mmap; vma; vma = vma->vm_next)
+#endif
+    {
         if (vma->vm_file) {
-            path_nm = file_path(vma->vm_file, buf, MAX_ADDR_LEN-1);
-            if (!strcmp(kbasename(path_nm), name)) {
-                return vma->vm_start;
+            char buf[ARC_PATH_MAX];
+            char *path_nm;
+
+            path_nm = d_path(&vma->vm_file->f_path, buf, ARC_PATH_MAX - 1);
+            if (!IS_ERR(path_nm)) {
+                const char *basename = kbasename(path_nm);
+                if (strcmp(basename, name) == 0) {
+                    base_addr = vma->vm_start;
+                    break;
+                }
             }
         }
     }
-    return 0;
-}
 
-phys_addr_t translate_linear_address(struct mm_struct* mm, uintptr_t va);
-
-phys_addr_t translate_linear_address(struct mm_struct* mm, uintptr_t va) {
-
-    pgd_t *pgd;
-    p4d_t *p4d;
-    pmd_t *pmd;
-    pte_t *pte;
-    pud_t *pud;
-	
-    phys_addr_t page_addr;
-    uintptr_t page_offset;
-    
-    pgd = pgd_offset(mm, va);
-    if(pgd_none(*pgd) || pgd_bad(*pgd)) {
-        return 0;
-    }
-    
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
-    // 支持五级页表的内核 (4.11+)
-    p4d = p4d_offset(pgd, va);
-    if (p4d_none(*p4d) || p4d_bad(*p4d)) {
-    	return 0;
-    }
-    pud = pud_offset(p4d, va);
-#else
-    // 旧内核直接使用 pgd 作为 pud
-    pud = pud_offset(pgd, va);
-#endif
-    
-    if(pud_none(*pud) || pud_bad(*pud)) {
-        return 0;
-    }
-    
-    pmd = pmd_offset(pud, va);
-    if(pmd_none(*pmd)) {
-        return 0;
-    }
-    
-    pte = pte_offset_kernel(pmd, va);
-    if(pte_none(*pte)) {
-        return 0;
-    }
-    
-    if(!pte_present(*pte)) {
-        return 0;
-    }
-    
-    page_addr = (phys_addr_t)(pte_pfn(*pte) << PAGE_SHIFT);
-    page_offset = va & (PAGE_SIZE-1);
-    
-    return page_addr + page_offset;
-}
-
-void read_phys_addr(void *base, phys_addr_t phys_addr, void* kernel_addr, size_t len);
-void read_phys_addr(void *base, phys_addr_t phys_addr, void* kernel_addr, size_t len) {
-    if (!phys_addr) {
-        printk(KERN_ERR "v2p: read_phys_addr获取phys_addr 出错\n");
-        return;
-    }
-
-    if (!pfn_valid(__phys_to_pfn(phys_addr))) {
-        return;
-    }
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
-    // 5.11+ 使用 memremap
-    kernel_addr = memremap(phys_addr, len, MEMREMAP_WB);
-#else
-    // 旧内核使用 ioremap_cache
-    kernel_addr = ioremap_cache(phys_addr, len);
-#endif
-
-    if(!kernel_addr) {
-        printk(KERN_ERR "v2p: read_phys_addr获取 kernel_addr 出错\n");
-        return;
-    }
-    
-    if(copy_to_user(base, kernel_addr, len)) {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
-        memunmap(kernel_addr);
-#else
-        iounmap(kernel_addr);
-#endif
-        return;
-    }
-    
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
-    memunmap(kernel_addr);
-#else
-    iounmap(kernel_addr);
-#endif
-}
-
-void write_phys_addr(void *base, phys_addr_t phys_addr, void* kernel_addr, size_t len);
-void write_phys_addr(void *base, phys_addr_t phys_addr, void* kernel_addr, size_t len) {
-    if (!phys_addr) {
-        printk(KERN_ERR "v2p: write_phys_addr获取phys_addr 出错\n");
-        return;
-    }
-
-    if (!pfn_valid(__phys_to_pfn(phys_addr))) {
-        return;
-    }
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
-    // 5.11+ 使用 memremap
-    kernel_addr = memremap(phys_addr, len, MEMREMAP_WB);
-#else
-    // 旧内核使用 ioremap_cache
-    kernel_addr = ioremap_cache(phys_addr, len);
-#endif
-
-    if(!kernel_addr) {
-        printk(KERN_ERR "v2p: write_phys_addr获取 kernel_addr 出错\n");
-        return;
-    }
-    
-    if(copy_from_user(kernel_addr, base, len)) {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
-        memunmap(kernel_addr);
-#else
-        iounmap(kernel_addr);
-#endif
-        return;
-    }
-    
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
-    memunmap(kernel_addr);
-#else
-    iounmap(kernel_addr);
-#endif
-}
-
-static void nl_recv_msg(struct sk_buff *skb) {
-    struct nlmsghdr *nlh;
-    int pid;
-    int send_pid;
-    size_t virt_addr;
-    phys_addr_t phys_addr;
-    void* kernel_addr = NULL;
-    size_t len;
-    struct mm_struct *mm;
-    void *base;
-    int type;
-    char kernel_module_name[MAX_ADDR_LEN];
-    uintptr_t ptr;
-    ssize_t ret;
-
-    nlh = (struct nlmsghdr *)skb->data;
-    send_pid = nlh->nlmsg_pid;
-
-    process_info_data = (struct process_info *)nlmsg_data(nlh);
-    pid = process_info_data->pid;
-    len = process_info_data->len;
-    base = process_info_data->base;
-    type = process_info_data->type;
-
-    mm = get_mm_by_pid(pid);
-    if (!mm) {
-        printk(KERN_ERR "v2p: 获取mm 出错\n");
-        return;
-    }
+    mmap_read_unlock(mm);
     mmput(mm);
+    return base_addr;
+}
 
-    if(type == 2) {
-        ret = copy_from_user(kernel_module_name, process_info_data->module_name, 
-                sizeof(kernel_module_name));
-        ptr = get_module_base(mm, kernel_module_name);
-        printk(KERN_INFO "v2p name: %s, ptr: %lx\n", kernel_module_name, ptr);
-        ret = copy_to_user(base, &ptr, len);
-        return;
+bool read_process_memory(pid_t pid, uintptr_t addr, void __user *buffer, size_t size)
+{
+    struct task_struct *task;
+    struct pid *pid_struct;
+    int bytes_read;
+    void *kbuf;
+
+    if (size == 0 || size > (1024 * 1024))
+        return false;
+
+    pid_struct = find_get_pid(pid);
+    if (!pid_struct)
+        return false;
+
+    task = get_pid_task(pid_struct, PIDTYPE_PID);
+    put_pid(pid_struct);
+    if (!task)
+        return false;
+
+    kbuf = kmalloc(size, GFP_KERNEL);
+    if (!kbuf) {
+        put_task_struct(task);
+        return false;
     }
 
-    virt_addr = process_info_data->virt_addr;
-    phys_addr = translate_linear_address(mm, virt_addr);
+    bytes_read = access_process_vm(task, addr, kbuf, size, FOLL_FORCE);
+    put_task_struct(task);
 
-    if(type == 0) {
-        read_phys_addr(base, phys_addr, kernel_addr, len);
-    } else if(type == 1) {
-        write_phys_addr(base, phys_addr, kernel_addr, len);
+    if (bytes_read != size) {
+        kfree(kbuf);
+        return false;
+    }
+
+    if (copy_to_user(buffer, kbuf, size)) {
+        kfree(kbuf);
+        return false;
+    }
+
+    kfree(kbuf);
+    return true;
+}
+
+bool write_process_memory(pid_t pid, uintptr_t addr, void __user *buffer, size_t size)
+{
+    struct task_struct *task;
+    struct pid *pid_struct;
+    int bytes_written;
+    void *kbuf;
+
+    if (size == 0 || size > (1024 * 1024))
+        return false;
+
+    pid_struct = find_get_pid(pid);
+    if (!pid_struct)
+        return false;
+
+    task = get_pid_task(pid_struct, PIDTYPE_PID);
+    put_pid(pid_struct);
+    if (!task)
+        return false;
+
+    kbuf = kmalloc(size, GFP_KERNEL);
+    if (!kbuf) {
+        put_task_struct(task);
+        return false;
+    }
+
+    if (copy_from_user(kbuf, buffer, size)) {
+        kfree(kbuf);
+        put_task_struct(task);
+        return false;
+    }
+
+    bytes_written = access_process_vm(task, addr, kbuf, size, FOLL_FORCE | FOLL_WRITE);
+    put_task_struct(task);
+    kfree(kbuf);
+
+    return (bytes_written == size);
+}
+
+static long dispatch_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
+{
+    COPY_MEMORY cm;
+    MODULE_BASE mb;
+
+    switch (cmd) {
+        case OP_READ_MEM: {
+            if (copy_from_user(&cm, (void __user *)arg, sizeof(cm)))
+                return -EFAULT;
+            return read_process_memory(cm.pid, cm.addr, cm.buffer, cm.size) ? 0 : -EFAULT;
+        }
+
+        case OP_WRITE_MEM: {
+            if (copy_from_user(&cm, (void __user *)arg, sizeof(cm)))
+                return -EFAULT;
+            return write_process_memory(cm.pid, cm.addr, cm.buffer, cm.size) ? 0 : -EFAULT;
+        }
+
+        case OP_MODULE_BASE: {
+            if (copy_from_user(&mb, (void __user *)arg, sizeof(mb)))
+                return -EFAULT;
+            mb.base = get_module_base(mb.pid, mb.name);
+            if (copy_to_user((void __user *)arg, &mb, sizeof(mb)))
+                return -EFAULT;
+            return 0;
+        }
+
+        default:
+            return -ENOTTY;
     }
 }
 
-static int __init netlink_virt_to_phys_init(void) {
-    printk(KERN_INFO "v2p: Loading netlink_virt_to_phys module...\n");
-
-    cfg.input = nl_recv_msg;
-
-    // 内核版本兼容性处理
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
-    // 6.x 内核使用 __netlink_kernel_create
-    nl_sk = __netlink_kernel_create(&init_net, NETLINK_CUSTOM_PROTOCOL, THIS_MODULE, &cfg);
-#else
-    // 5.x 及以下内核使用 netlink_kernel_create
-    nl_sk = netlink_kernel_create(&init_net, NETLINK_CUSTOM_PROTOCOL, &cfg);
-#endif
-
-    if (!nl_sk) {
-        printk(KERN_ALERT "v2p: Error creating socket.\n");
-        return -10;
-    }
-
+static int dispatch_open(struct inode *node, struct file *file)
+{
     return 0;
 }
 
-static void __exit netlink_virt_to_phys_exit(void) {
-    printk(KERN_INFO "v2p: Unloading netlink_virt_to_phys module...\n");
-
-    if (nl_sk) {
-        netlink_kernel_release(nl_sk);
-    }
+static int dispatch_close(struct inode *node, struct file *file)
+{
+    return 0;
 }
 
-module_init(netlink_virt_to_phys_init);
-module_exit(netlink_virt_to_phys_exit);
+static struct file_operations fops = {
+    .owner = THIS_MODULE,
+    .open = dispatch_open,
+    .release = dispatch_close,
+    .unlocked_ioctl = dispatch_ioctl,
+};
+
+static struct miscdevice miscdev = {
+    .minor = MISC_DYNAMIC_MINOR,
+    .name = DEVICE_NAME,
+    .fops = &fops,
+};
+
+static int __init gs_mem_init(void)
+{
+    misc_register(&miscdev);
+    printk("gs_mem: loaded\n");
+    return 0;
+}
+
+static void __exit gs_mem_exit(void)
+{
+    misc_deregister(&miscdev);
+    printk("gs_mem: unloaded\n");
+}
+
+module_init(gs_mem_init);
+module_exit(gs_mem_exit);
+
+MODULE_LICENSE("GPL");
+MODULE_DESCRIPTION("memory driver");
