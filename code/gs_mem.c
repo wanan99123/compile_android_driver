@@ -2,7 +2,7 @@
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Jayne");
-MODULE_DESCRIPTION("Netlink 内核物理内存读写");
+MODULE_DESCRIPTION("Netlink kernel physical memory R/W");
 MODULE_VERSION("0.1");
 
 #define NETLINK_CUSTOM_PROTOCOL 31
@@ -54,6 +54,7 @@ phys_addr_t translate_linear_address(struct mm_struct *mm, uintptr_t va)
 void read_phys_addr(void __user *base, phys_addr_t phys_addr, size_t len)
 {
     void *kernel_addr;
+    unsigned long ret;
 
     if (!base || !phys_addr || !len)
         return;
@@ -65,13 +66,16 @@ void read_phys_addr(void __user *base, phys_addr_t phys_addr, size_t len)
     if (!kernel_addr)
         return;
 
-    copy_to_user(base, kernel_addr, len);
+    ret = copy_to_user(base, kernel_addr, len);
+    (void)ret;
+
     iounmap(kernel_addr);
 }
 
 void write_phys_addr(void __user *base, phys_addr_t phys_addr, size_t len)
 {
     void *kernel_addr;
+    unsigned long ret;
 
     if (!base || !phys_addr || !len)
         return;
@@ -83,7 +87,9 @@ void write_phys_addr(void __user *base, phys_addr_t phys_addr, size_t len)
     if (!kernel_addr)
         return;
 
-    copy_from_user(kernel_addr, base, len);
+    ret = copy_from_user(kernel_addr, base, len);
+    (void)ret;
+
     iounmap(kernel_addr);
 }
 
