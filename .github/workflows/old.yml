@@ -1,54 +1,49 @@
-name: Android GKI Driver Builder (Lite - NO kernel source)
+name: Build Android GKI Driver (Lite)
 on:
   workflow_dispatch:
     inputs:
       driver_name:
-        description: '驱动模块名 (例如 gs_mem.ko)'
+        description: "驱动名 如 gs_mem.ko"
         required: true
-        default: 'gs_mem.ko'
-      arch:
-        description: '架构 (aarch64)'
-        required: true
-        default: 'aarch64'
-      android_version:
-        description: 'Android 版本 (10/11/12/13/14)'
-        required: true
-        default: '13'
+        default: "gs_mem.ko"
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install cross-compiler
+      - name: Install aarch64 toolchain
         run: |
           sudo apt update
-          sudo apt install -y gcc-aarch64-linux-gnu make perl flex bison libssl-dev libelf-dev
+          sudo apt install -y gcc-aarch64-linux-gnu make bison flex libssl-dev libelf-dev
 
-      - name: Prepare build environment
+      - name: Download GKI Kernel Headers (arm64)
+        run: |
+          git clone --depth=1 https://github.com/terabbow/kernel-5.10-gki.git kernel
+
+      - name: Copy driver
         run: |
           mkdir -p driver
-          cp code/* driver/ 2>/dev/null || true
+          cp code/*.c code/*.h driver/
 
-      - name: Create Makefile
+      - name: Makefile
         run: |
           cat > driver/Makefile << EOF
-          obj-m += $(echo ${{ github.event.inputs.driver_name }} | sed 's/.ko//').o
-          KERNELRELEASE := 5.10
-          CROSS_COMPILE := aarch64-linux-gnu-
-          ARCH := arm64
-          KDIR := /lib/modules/\$(KERNELRELEASE)/build
-          EXTRA_CFLAGS += -Wno-declaration-after-statement -Wno-unused-function
+          obj-m += gs_mem.o
+          EXTRA_CFLAGS += -Wno-unused-function -Wno-unused-variable -Wno-declaration-after-statement
           EOF
 
-      - name: Build driver module
+      - name: Build .ko
         run: |
-          cd driver
-          make -C /lib/modules/$(uname -r)/build M=$(pwd) modules CROSS_COMPILE=aarch64-linux-gnu- ARCH=arm64
+          make -C $(pwd)/kernel \
+            M=$(pwd)/driver \
+            ARCH=arm64 \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            modules
 
-      - name: Upload final .ko
+      - name: Upload
         uses: actions/upload-artifact@v4
         with:
           name: ${{ github.event.inputs.driver_name }}
