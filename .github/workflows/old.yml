@@ -1,123 +1,225 @@
-name: Android Kernel Driver Builder (OLD)
-
+name: Android 内核驱动编译 (Clang19+Rust版)
 on:
   workflow_dispatch:
     inputs:
-      android_version:
-        description: 'Android Version (Kernel) (e.g., 14)'
-        required: true
       kernel_version:
-        description: 'Kernel Version (e.g., 6.1)'
+        description: 内核版本
         required: true
+        default: '6.6'
+        type: choice
+        options:
+          - '5.10'
+          - '5.15'
+          - '6.1'
+          - '6.6'
+          - '6.12'
+      android_version:
+        description: Android 版本
+        required: true
+        default: '15'
+        type: choice
+        options:
+          - '12'
+          - '13'
+          - '14'
+          - '15'
+          - '16'
       driver_name:
-        description: 'Driver Module Name (e.g., mydriver.ko)'
+        description: 驱动名（.ko）
         required: true
+        default: 'gs_mem.ko'
       target_arch:
-        description: 'Target Architecture (aarch64, x86_64, etc.)'
+        description: 架构
         required: true
         default: 'aarch64'
+
+permissions:
+  contents: write
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4.2.2
-        
-      - name: Prepare kerneldriver directory
-        run: |
-          mkdir kerneldriver
-          mv ./code/*.h ./code/*.c ./code/Makefile kerneldriver/
-          
-      - name: Install repo tool
-        run: |
-          sudo curl -L https://storage.googleapis.com/git-repo-downloads/repo -o /usr/local/bin/repo
-          sudo chmod a+x /usr/local/bin/repo
+      - uses: actions/checkout@v4
 
-      - name: Set up Android Kernel source
+      - name: 准备驱动源码
+        run: |
+          mkdir -p kerneldriver
+          # 复制源码，忽略不存在的错误
+          cp -r ./code/* kerneldriver/ 2>/dev/null || echo "警告：未找到 ./code 目录，使用当前目录文件"
+          # 兜底：如果kerneldriver为空，检查当前目录是否有.c文件
+          if [ -z "$(ls -A kerneldriver)" ]; then
+            cp *.c *.h Makefile Kconfig kerneldriver/ 2>/dev/null
+          fi
+          ls -la kerneldriver/
+
+      - name: 安装环境依赖+初始化 Clang19+Rust+build-tools 工具链
+        run: |
+          rm -rf kernel_workspace
+          mkdir kernel_workspace
+          cd kernel_workspace
+          
+          sudo apt-mark hold firefox &&
+          sudo apt-mark hold libc-bin &&
+          sudo apt purge man-db &&
+          sudo rm -rf /var/lib/man-db/auto-update &&
+          sudo apt update &&
+          sudo apt-get install -y --no-install-recommends binutils python-is-python3 libssl-dev libelf-dev libdw-dev aria2c repo &
+          
+          # 使用最新版ccache v4.12.2（Ubuntu软件仓库的版本并非最新）
+          wget https://github.com/cctv18/oppo_oplus_realme_sm8850/raw/refs/heads/main/lib/ccache-x86-64 -O ccache &&
+          sudo cp -f ./ccache /usr/bin/ccache &&
+          sudo chmod +x /usr/bin/ccache &&
+          rm -f ./ccache &
+          
+          echo "正在克隆llvm-clang19工具链..." &&
+          mkdir -p clang19 &&
+          aria2c -s16 -x16 -k1M https://github.com/cctv18/oneplus_sm8650_toolchain/releases/download/LLVM-Clang19-r536225/clang-r536225.zip -o clang.zip &&
+          unzip -q clang.zip -d clang19 &&
+          rm -rf clang.zip &
+          
+          echo "正在克隆Rust 1.82.0工具链..." &&
+          mkdir -p rust &&
+          aria2c -s16 -x16 -k1M https://github.com/cctv18/oneplus_sm8650_toolchain/releases/download/LLVM-Clang19-r536225/rust.zip -o rust.zip &&
+          unzip -q rust.zip -d rust &&
+          rm -rf rust.zip &
+          
+          echo "正在克隆构建工具..." &&
+          aria2c -s16 -x16 -k1M https://github.com/cctv18/oneplus_sm8650_toolchain/releases/download/LLVM-Clang19-r536225/build-tools.zip -o build-tools.zip &&
+          unzip -q build-tools.zip &&
+          rm -rf build-tools.zip &
+          
+          wait
+          echo "所有工具链初始化完成！"
+
+      - name: 拉取内核源码 (清华镜像 repo)
         run: |
           mkdir -p android-kernel && cd android-kernel
-          repo init -u https://android.googlesource.com/kernel/manifest -b common-android${{ github.event.inputs.android_version }}-${{ github.event.inputs.kernel_version }}
-          repo sync -j$(nproc) -c --no-tags --optimized-fetch --force-sync
+          # 使用清华镜像源，避免连接超时
+          repo init -u https://mirrors.tuna.tsinghua.edu.cn/git/AOSP/kernel/manifest -b common-android${{ github.event.inputs.android_version }}-${{ github.event.inputs.kernel_version }}
+          # 精简同步，只同步必要代码
+          repo sync -j$(nproc) -c --no-tags --optimized-fetch --force-sync --no-clone-bundle
 
-      - name: Copy kerneldriver
-        run: |
-          cd android-kernel
-          cp -r ../kerneldriver common/drivers
-
-      - name: Modify Makefile
-        run: |
-          cd android-kernel
-          echo "obj-y += kerneldriver/" >> common/drivers/Makefile
-
-      - name: Add module to GKI modules list
-        if: ${{ github.event.inputs.android_version > 13 }}
-        run: |
-          cd android-kernel
-          MODULE_NAME="drivers/kerneldriver/${{ github.event.inputs.driver_name }}"
-          
-          awk -i inplace -v module="$MODULE_NAME" '
-            BEGIN { added=0 }
-            /_COMMON_GKI_MODULES_LIST = \[/ { in_list=1 }
-            in_list && /\]/ {
-              if (!added) {
-                print "    \"" module "\","
-                added=1
-              }
-              in_list=0
-            }
-            in_list && !added {
-              if (module < $0) {
-                print "    \"" module "\","
-                added=1
-              }
-            }
-            { print }
-          ' common/modules.bzl
-          
-      - name: Prepare module list for legacy builds
-        if: ${{ github.event.inputs.android_version <= 13 }}
-        run: |
-          cd android-kernel
-          echo "drivers/kerneldriver/${{ github.event.inputs.driver_name }}" >> common/android/gki_${{ github.event.inputs.target_arch }}_modules
-      - name: Increase stack frame size limit
-        run: |
-          cd android-kernel
-          find . -type f -name "Makefile*" -exec sed -i 's/-Wframe-larger-than=[0-9]*/-Wframe-larger-than=4096/g' {} +
-          grep -q "FRAME_WARN" common/Makefile || echo 'KBUILD_CFLAGS += -Wframe-larger-than=4096' >> common/Makefile
-
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential flex bison libssl-dev libelf-dev bc python-is-python3
-      - name: Fix missing kprobe symbols for Android 13
-        if: ${{ github.event.inputs.android_version == 13 }}
-        run: |
-          cd android-kernel
-          for symbol in register_kprobe unregister_kprobe; do
-            grep -q "$symbol" common/android/abi_gki_${{ github.event.inputs.target_arch }} || \
-            echo "$symbol" >> common/android/abi_gki_${{ github.event.inputs.target_arch }}
+          # 预处理内核：去除 dirty 后缀
+          echo "正在去除 dirty 后缀..."
+          for f in common/scripts/setlocalversion; do
+            sed -i 's/ -dirty//g' "$f"
+            sed -i '$i res=$(echo "$res" | sed '\''s/-dirty//g'\'')' "$f"
           done
-          sed -i '/EXPORT_SYMBOL(unregister_kprobe);/a EXPORT_SYMBOL(register_kprobe);' common/kernel/kprobes.c
-          
-      - name: Build kernel module
+
+      - name: 放入驱动到内核目录
+        run: |
+          # 统一设置目标目录
+          if [ -d "android-kernel/common" ]; then
+            TARGET_DIR="android-kernel/common/drivers/kerneldriver"
+          else
+            TARGET_DIR="android-kernel/drivers/kerneldriver"
+          fi
+          mkdir -p ${TARGET_DIR}
+          cp -r kerneldriver/* ${TARGET_DIR}/
+          echo "驱动已复制到: ${TARGET_DIR}"
+          ls -la ${TARGET_DIR}/
+
+      - name: 配置 Makefile
         run: |
           cd android-kernel
-          if [ ${{ github.event.inputs.android_version }} -le 13 ]; then
-            BUILD_CONFIG=common/build.config.gki.${{ github.event.inputs.target_arch }} LTO=thin build/build.sh -j32
-            OUTPUT_PATH="out/android${{ github.event.inputs.android_version }}-${{ github.event.inputs.kernel_version }}/dist"
+          # 定位主 Makefile
+          if [ -d "common" ]; then
+            MAKEFILE="common/drivers/Makefile"
           else
-            echo "Using Bazel build system for Android ${{ github.event.inputs.android_version }}"
-            tools/bazel run //common:kernel_${{ github.event.inputs.target_arch }}_dist
-            OUTPUT_PATH="out/kernel_${{ github.event.inputs.target_arch }}"
+            MAKEFILE="drivers/Makefile"
           fi
-          echo "OUTPUT_PATH=$OUTPUT_PATH" >> $GITHUB_ENV
-        continue-on-error: true
-      
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4.6.2
+          # 防止重复添加
+          sed -i '/kerneldriver/d' ${MAKEFILE}
+          echo "obj-m += kerneldriver/" >> ${MAKEFILE}
+          # 验证添加结果
+          tail -n 5 ${MAKEFILE}
+
+      - name: 配置编译环境变量
+        run: |
+          # 导出工具链路径
+          echo "PATH=$PWD/kernel_workspace/clang19/bin:$PWD/kernel_workspace/build-tools/bin:$PWD/kernel_workspace/rust/bin:$PATH" >> $GITHUB_ENV
+          # 核心编译配置
+          echo "ARCH=${{ github.event.inputs.target_arch }}" >> $GITHUB_ENV
+          echo "CROSS_COMPILE=aarch64-linux-gnu-" >> $GITHUB_ENV
+          echo "CC=clang" >> $GITHUB_ENV
+          echo "LD=ld.lld" >> $GITHUB_ENV
+          echo "LLVM=1" >> $GITHUB_ENV
+          echo "LLVM_IAS=1" >> $GITHUB_ENV
+          # Rust 配置
+          echo "RUSTC=rustc" >> $GITHUB_ENV
+          echo "CARGO=cargo" >> $GITHUB_ENV
+          # ccache 配置
+          echo "CCACHE_COMPILERCHECK=none" >> $GITHUB_ENV
+          echo "CCACHE_BASEDIR=$PWD" >> $GITHUB_ENV
+          echo "CCACHE_NOHASHDIR=true" >> $GITHUB_ENV
+          echo "CCACHE_HARDLINK=true" >> $GITHUB_ENV
+          echo "CCACHE_DIR=$HOME/.ccache_${{ github.event.inputs.kernel_version }}" >> $GITHUB_ENV
+          echo "CCACHE_MAXSIZE=3G" >> $GITHUB_ENV
+
+      - name: 编译内核与驱动 (纯 Make + Clang19)
+        run: |
+          cd android-kernel
+          export KMI_STRICT_MODE=0
+
+          echo "加载内核配置..."
+          if [ -f arch/arm64/configs/gki_defconfig ]; then
+            make gki_defconfig
+          else
+            make defconfig
+          fi
+
+          # 启用模块支持
+          scripts/config --enable MODULES
+          scripts/config --enable MODULE_UNLOAD
+
+          # 启用驱动模块
+          echo "CONFIG_GS_MEM=m" >> .config
+
+          echo "开始完整编译内核（生成依赖文件）..."
+          make -j$(nproc)
+
+          echo "开始编译驱动模块..."
+          if [ -d "common" ]; then
+            make M=common/drivers/kerneldriver modules -j$(nproc)
+          else
+            make M=drivers/kerneldriver modules -j$(nproc)
+          fi
+
+      - name: 提取驱动 .ko
+        id: extract_ko
+        run: |
+          KO_NAME="${{ github.event.inputs.driver_name }}"
+          BASE_DIR="android-kernel"
+          SEARCH_PATH="${BASE_DIR}"
+
+          echo "开始查找 ${KO_NAME}..."
+
+          # 全局搜索
+          KO_PATH=$(find "${SEARCH_PATH}" -name "${KO_NAME}" -type f | head -1)
+          if [ -n "${KO_PATH}" ]; then
+            cp -v "${KO_PATH}" ./
+          else
+            echo "❌ 错误：未找到 ${KO_NAME}！"
+            find "${SEARCH_PATH}" -name "*.ko" | head -20
+            exit 1
+          fi
+
+          # 验证文件
+          ls -lh ./${KO_NAME}
+          echo "ko_path=./${KO_NAME}" >> $GITHUB_OUTPUT
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
         with:
-          name: kernel-driver-${{ github.event.inputs.target_arch }}
-          path: |
-            android-kernel/${{ env.OUTPUT_PATH }}
+          name: driver-${{ github.event.inputs.target_arch }}-${{ github.event.inputs.kernel_version }}-android${{ github.event.inputs.android_version }}
+          path: ${{ steps.extract_ko.outputs.ko_path }}
+
+      - name: 创建 GitHub Release
+        uses: softprops/action-gh-release@v2
+        if: success()
+        with:
+          name: ${{ github.event.inputs.driver_name }} (${{ github.event.inputs.kernel_version }}-Android${{ github.event.inputs.android_version }})
+          tag_name: build-${{ github.event.inputs.kernel_version }}-android${{ github.event.inputs.android_version }}-${{ github.run_id }}
+          files: ${{ steps.extract_ko.outputs.ko_path }}
+          generate_release_notes: true
