@@ -45,7 +45,9 @@ jobs:
       - name: 准备驱动源码
         run: |
           mkdir -p kerneldriver
-          cp -r ./code/* kerneldriver/ 2>/dev/null || echo "警告：未找到 ./code 目录"
+          # 复制源码，忽略不存在的错误
+          cp -r ./code/* kerneldriver/ 2>/dev/null || echo "警告：未找到 ./code 目录，使用当前目录文件"
+          # 兜底：如果kerneldriver为空，检查当前目录是否有.c文件
           if [ -z "$(ls -A kerneldriver)" ]; then
             cp *.c *.h Makefile Kconfig kerneldriver/ 2>/dev/null
           fi
@@ -53,46 +55,57 @@ jobs:
 
       - name: 安装环境依赖 + Clang19 工具链
         run: |
+          # 系统环境预处理
           sudo apt-mark hold firefox libc-bin
           sudo apt purge -y man-db
           sudo rm -rf /var/lib/man-db/auto-update
-          sudo apt update
-          sudo apt install -y --no-install-recommends binutils python-is-python3 libssl-dev libelf-dev libdw-dev aria2c repo
+          sudo apt update -qq
+          # 修复aria2包名：正确包名是aria2，不是aria2c
+          sudo apt install -y --no-install-recommends \
+            binutils python-is-python3 libssl-dev libelf-dev libdw-dev \
+            aria2 repo unzip
           
-          # 用他的 ccache 4.12.2
+          # 安装目标最新版ccache v4.12.2
           wget https://github.com/cctv18/oppo_oplus_realme_sm8850/raw/main/lib/ccache-x86-64 -O ccache
           sudo cp -f ./ccache /usr/bin/ccache
           sudo chmod +x /usr/bin/ccache
           rm -f ./ccache
           
-          # 工具链目录
+          # 创建工具链目录并下载全套编译工具
           mkdir -p toolchain && cd toolchain
           
-          # Clang19
+          # 下载并解压 Clang19 (r536225)
           mkdir -p clang19
-          aria2c -s16 -x16 -k1M https://github.com/cctv18/oneplus_sm8650_toolchain/releases/download/LLVM-Clang19-r536225/clang-r536225.zip -o clang.zip
+          aria2c -s16 -x16 -k1M \
+            https://github.com/cctv18/oneplus_sm8650_toolchain/releases/download/LLVM-Clang19-r536225/clang-r536225.zip \
+            -o clang.zip
           unzip -q clang.zip -d clang19
           rm -f clang.zip
           
-          # Rust 1.82.0
+          # 下载并解压 Rust 1.82.0 工具链
           mkdir -p rust
-          aria2c -s16 -x16 -k1M https://github.com/cctv18/oneplus_sm8650_toolchain/releases/download/LLVM-Clang19-r536225/rust.zip -o rust.zip
+          aria2c -s16 -x16 -k1M \
+            https://github.com/cctv18/oneplus_sm8650_toolchain/releases/download/LLVM-Clang19-r536225/rust.zip \
+            -o rust.zip
           unzip -q rust.zip -d rust
           rm -f rust.zip
           
-          # build-tools
-          aria2c -s16 -x16 -k1M https://github.com/cctv18/oneplus_sm8650_toolchain/releases/download/LLVM-Clang19-r536225/build-tools.zip -o build-tools.zip
+          # 下载并解压 build-tools 辅助工具链
+          aria2c -s16 -x16 -k1M \
+            https://github.com/cctv18/oneplus_sm8650_toolchain/releases/download/LLVM-Clang19-r536225/build-tools.zip \
+            -o build-tools.zip
           unzip -q build-tools.zip
           rm -f build-tools.zip
           
           cd ..
-          echo "工具链部署完成"
+          echo "✅ 全套工具链部署完成"
 
       - name: 下载 Android 内核源码
         run: |
           sudo apt install -y repo
           rm -rf android-kernel
           mkdir -p android-kernel && cd android-kernel
+          # 完全使用你指定的源码拉取命令
           repo init -u https://android.googlesource.com/kernel/manifest \
             -b common-android${{ github.event.inputs.android_version }}-${{ github.event.inputs.kernel_version }} \
             --depth=1
@@ -101,13 +114,16 @@ jobs:
       - name: 内核预处理
         run: |
           cd android-kernel
+          # 去除内核版本的 dirty 后缀
           for f in common/scripts/setlocalversion; do
             [ -f "$f" ] && sed -i 's/ -dirty//g' "$f"
             [ -f "$f" ] && sed -i '$i res=$(echo "$res" | sed '\''s/-dirty//g'\'')' "$f"
           done
+          echo "✅ 内核源码预处理完成"
 
       - name: 放入驱动到内核目录
         run: |
+          # 自动适配内核目录结构
           if [ -d "android-kernel/common" ]; then
             TARGET_DIR="android-kernel/common/drivers/kerneldriver"
           else
