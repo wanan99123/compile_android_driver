@@ -1,4 +1,4 @@
-name: 自定义版本 通用GKI内核构建
+name: 自定义GKI内核构建(仅SukiSU·KPM专用)
 
 env:
   TZ: Asia/Shanghai
@@ -7,57 +7,31 @@ on:
   workflow_dispatch:
     inputs:
       android_version:
-        description: '安卓版本 (例如 android15)'
+        description: '安卓版本 (例: 15)'
         required: true
-        default: 'android15'
+        default: '15'
         type: string
 
       kernel_version:
-        description: '内核版本分支 (例如 android15-6.6)'
+        description: '内核版本 (例: 6.6)'
         required: true
-        default: 'android15-6.6'
+        default: '6.6'
         type: string
 
-      ksu_type:
-        description: 'KernelSU分支(ReSukiSU/SukiSU Ultra/KSU原版/无)'
-        required: true
-        type: choice
-        default: 'resukisu'
-        options:
-          - 'resukisu'
-          - 'sukisu'
-          - 'ksu'
-          - 'none'
-
-      susfs_enable:
-        description: '开启SUSFS增强隐藏'
+      kpm_enable:
+        description: '启用KPM内核模块框架'
         required: true
         type: boolean
-        default: 'true'
-
-      kpm_enable:
-        description: 'KPM(builtin内置,false关闭)'
-        required: true
-        type: choice
-        default: 'false'
-        options:
-          - 'false'
-          - 'builtin'
+        default: true
 
       lz4_enable:
-        description: '开启LZ4+ZSTD压缩'
+        description: '开启LZ4+ZSTD压缩优化'
         required: true
         type: boolean
-        default: 'true'
-
-      lz4kd_enable:
-        description: '开启LZ4KD'
-        required: true
-        type: boolean
-        default: 'false'
+        default: true
 
       bbr_enable:
-        description: 'BBR(false关,true开,default默认)'
+        description: 'BBR网络加速'
         required: true
         type: choice
         default: 'false'
@@ -66,35 +40,17 @@ on:
           - 'true'
           - 'default'
 
-      better_net:
-        description: '网络扩展iptables/ipset'
-        required: true
-        type: boolean
-        default: 'false'
-
       adios_enable:
-        description: 'ADIOS IO调度'
+        description: '启用ADIOS IO调度'
         required: true
         type: boolean
-        default: 'true'
-
-      rekernel_enable:
-        description: 'ReKernel应用冻结'
-        required: true
-        type: boolean
-        default: 'false'
+        default: true
 
       baseband_guard:
-        description: '基带保护防格机'
+        description: '内核级基带保护(防格机)'
         required: true
         type: boolean
-        default: 'true'
-
-      kernel_suffix:
-        description: '内核后缀(可选)'
-        required: false
-        type: string
-        default: ''
+        default: true
 
 permissions:
   contents: read
@@ -108,31 +64,25 @@ jobs:
           sudo apt update -qq
           sudo apt install -y git curl make bc bison flex libssl-dev libelf-dev zip unzip
 
-      - name: 下载 Google GKI 内核
+      - name: 下载Google GKI内核
         run: |
-          git clone --depth=1 https://android.googlesource.com/kernel/common -b ${{ inputs.kernel_version }} common
+          git clone --depth=1 https://android.googlesource.com/kernel/common \
+            -b android${{ inputs.android_version }}-${{ inputs.kernel_version }} common
 
-      - name: 去除 dirty 后缀 & ABI 保护
+      - name: 去除dirty后缀 & ABI保护
         run: |
           rm -f common/android/abi_gki_protected_exports_*
           sed -i 's/ -dirty//g' common/scripts/setlocalversion
 
-      - name: 集成 KernelSU
+      - name: 集成 SukiSU Ultra
         run: |
           cd common
-          if [[ "${{ inputs.ksu_type }}" == "sukisu" ]]; then
-            curl -LSs https://raw.githubusercontent.com/ShirkNeko/SukiSU-Ultra/main/kernel/setup.sh | bash -s builtin
-          elif [[ "${{ inputs.ksu_type }}" == "resukisu" ]]; then
-            curl -LSs https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh | bash -s main
-            echo 'CONFIG_KSU_FULL_NAME_FORMAT="%TAG_NAME%-%COMMIT_SHA%@cctv18"' >> arch/arm64/configs/gki_defconfig
-          elif [[ "${{ inputs.ksu_type }}" == "ksu" ]]; then
-            curl -LSs https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh | bash -s main
-          fi
+          curl -LSs https://raw.githubusercontent.com/ShirkNeko/SukiSU-Ultra/main/kernel/setup.sh | bash -s builtin
 
       - name: 集成 KPM
         run: |
           cd common
-          if [[ "${{ inputs.kpm_enable }}" == "builtin" ]]; then
+          if [[ "${{ inputs.kpm_enable }}" == "true" ]]; then
             curl -LSs https://raw.githubusercontent.com/587899/KPM/main/apply.sh | bash -s -- -k
           fi
 
@@ -147,17 +97,12 @@ jobs:
 
           make O=$OUT ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE gki_defconfig
 
-          # KSU
-          if [[ "${{ inputs.ksu_type }}" != "none" ]]; then
-            scripts/config --file $OUT/.config -e CONFIG_KSU
-          fi
+          scripts/config --file $OUT/.config -e CONFIG_KSU
 
-          # KPM
-          if [[ "${{ inputs.kpm_enable }}" != "false" ]]; then
+          if [[ "${{ inputs.kpm_enable }}" == "true" ]]; then
             scripts/config --file $OUT/.config -e CONFIG_KPM
           fi
 
-          # LZ4 + ZSTD
           if [[ "${{ inputs.lz4_enable }}" == "true" ]]; then
             scripts/config --file $OUT/.config -e CONFIG_LZ4
             scripts/config --file $OUT/.config -e CONFIG_ZSTD
@@ -165,7 +110,6 @@ jobs:
             scripts/config --file $OUT/.config -e CONFIG_CRYPTO_ZSTD
           fi
 
-          # BBR
           if [[ "${{ inputs.bbr_enable }}" != "false" ]]; then
             scripts/config --file $OUT/.config -e CONFIG_TCP_CONG_BBR
             if [[ "${{ inputs.bbr_enable }}" == "default" ]]; then
@@ -173,19 +117,11 @@ jobs:
             fi
           fi
 
-          # 网络扩展
-          if [[ "${{ inputs.better_net }}" == "true" ]]; then
-            scripts/config --file $OUT/.config -e CONFIG_NETFILTER_XT_SET
-            scripts/config --file $OUT/.config -e CONFIG_IP_SET
-          fi
-
-          # ADIOS IO 调度
           if [[ "${{ inputs.adios_enable }}" == "true" ]]; then
             scripts/config --file $OUT/.config -e CONFIG_IOSCHED_ADIOS
             scripts/config --file $OUT/.config --set-str CONFIG_DEFAULT_IOSCHED adios
           fi
 
-          # 基带保护
           if [[ "${{ inputs.baseband_guard }}" == "true" ]]; then
             scripts/config --file $OUT/.config -e CONFIG_ALWAYS_DENY_DEV_MEM
           fi
@@ -196,7 +132,7 @@ jobs:
         run: |
           cp common/out/arch/arm64/boot/Image ./boot.img
 
-      - name: 打包 AnyKernel3
+      - name: 打包AnyKernel3
         run: |
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git
           cp boot.img AnyKernel3/
