@@ -1,4 +1,4 @@
-name: GKI内核构建
+name: GKI内核构建 
 env:
   TZ: Asia/Shanghai
 
@@ -82,10 +82,21 @@ jobs:
           sudo apt install -y git curl make bc bison flex libssl-dev libelf-dev zip unzip \
             gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
 
-      - name: 下载Google GKI内核
+    
+      - name: 获取最新GKI并克隆
         run: |
-          git clone --depth=1 https://android.googlesource.com/kernel/common \
-            -b android${{ inputs.android_version }}-${{ inputs.kernel_version }} common
+          ANDROID_VER=${{ inputs.android_version }}
+          KERNEL_VER=${{ inputs.kernel_version }}
+          PREFIX="android${ANDROID_VER}-${KERNEL_VER}"
+
+          # 获取最新小版本
+          LATEST_BRANCH=$(git ls-remote --heads https://android.googsource.com/kernel/common |
+                          grep "$PREFIX" |
+                          grep -E -- '-[0-9]{4}-[0-9]{2}$' |
+                          sort -V | tail -n1 | awk -F'/' '{print $3}')
+
+          echo "最新内核分支: $LATEST_BRANCH"
+          git clone --depth=1 https://android.googsource.com/kernel/common -b "$LATEST_BRANCH" common
 
       - name: 去除dirty后缀 & ABI保护
         run: |
@@ -96,6 +107,15 @@ jobs:
         run: |
           cd common
           curl -LSs https://raw.githubusercontent.com/ShirkNeko/SukiSU-Ultra/main/kernel/setup.sh | bash -s builtin
+
+      # ==============================================
+      # 自动修复 SukiSU 编译错误
+      # ==============================================
+      - name: 修复
+        run: |
+          cd common
+          sed -i 's/newcreds.cap_bset/newcreds->cap_bset/g' drivers/kernelsu/app_profile.c
+          sed -i 's/setup_groups(&profile, cred)/setup_groups(&profile, newcreds)/g' drivers/kernelsu/app_profile.c
 
       - name: 编译内核
         run: |
@@ -108,20 +128,16 @@ jobs:
 
           make O=$OUT ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE gki_defconfig
 
-          # 开启KSU
           scripts/config --file $OUT/.config -e CONFIG_KSU
 
-          # 开启KPM（SukiSU内置）
           if [[ "${{ inputs.kpm_enable }}" == "true" ]]; then
             scripts/config --file $OUT/.config -e CONFIG_KPM
           fi
 
-          # SUSFS
           if [[ "${{ inputs.susfs_enable }}" == "true" ]]; then
             scripts/config --file $OUT/.config -e CONFIG_SUSFS
           fi
 
-          # LZ4+ZSTD
           if [[ "${{ inputs.lz4_enable }}" == "true" ]]; then
             scripts/config --file $OUT/.config -e CONFIG_LZ4
             scripts/config --file $OUT/.config -e CONFIG_ZSTD
@@ -129,7 +145,6 @@ jobs:
             scripts/config --file $OUT/.config -e CONFIG_CRYPTO_ZSTD
           fi
 
-          # BBR
           if [[ "${{ inputs.bbr_enable }}" != "false" ]]; then
             scripts/config --file $OUT/.config -e CONFIG_TCP_CONG_BBR
             if [[ "${{ inputs.bbr_enable }}" == "default" ]]; then
@@ -137,24 +152,20 @@ jobs:
             fi
           fi
 
-          # 网络扩展
           if [[ "${{ inputs.better_net }}" == "true" ]]; then
             scripts/config --file $OUT/.config -e CONFIG_NETFILTER_XT_SET
             scripts/config --file $OUT/.config -e CONFIG_IP_SET
           fi
 
-          # ADIOS
           if [[ "${{ inputs.adios_enable }}" == "true" ]]; then
             scripts/config --file $OUT/.config -e CONFIG_IOSCHED_ADIOS
             scripts/config --file $OUT/.config --set-str CONFIG_DEFAULT_IOSCHED adios
           fi
 
-          # ReKernel
           if [[ "${{ inputs.rekernel_enable }}" == "true" ]]; then
             scripts/config --file $OUT/.config -e CONFIG_REKERNEL
           fi
 
-          # 基带保护
           if [[ "${{ inputs.baseband_guard }}" == "true" ]]; then
             scripts/config --file $OUT/.config -e CONFIG_ALWAYS_DENY_DEV_MEM
           fi
