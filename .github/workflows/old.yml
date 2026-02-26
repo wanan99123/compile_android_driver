@@ -85,6 +85,13 @@ jobs:
           KERNEL_SRC=$PWD
           OUT_DIR=$PWD/out
 
+          # 进入 common 子目录（如果存在）
+          if [ -d common ]; then
+            cd common
+            KERNEL_SRC=$PWD
+            OUT_DIR=$PWD/out
+          fi
+
           # 生成默认配置
           make O=$OUT_DIR ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE gki_defconfig
 
@@ -97,7 +104,6 @@ jobs:
         id: extract_ko
         run: |
           KO_NAME="${{ github.event.inputs.driver_name }}"
-          BASE_DIR="android-kernel"
           OUT_PATH="${{ env.OUT_PATH }}"
 
           KO_PATH=$(find "$OUT_PATH" -name "$KO_NAME" -type f | head -1)
@@ -115,7 +121,7 @@ jobs:
           name: driver-${{ github.event.inputs.target_arch }}-${{ github.event.inputs.kernel_version }}-android${{ github.event.inputs.android_version }}
           path: ${{ steps.extract_ko.outputs.ko_path }}
 
-      - uses: softprops/gh-release@v2
+      - uses: softprops/action-gh-release@v2
         if: success()
         with:
           name: ${{ github.event.inputs.driver_name }} (${{ github.event.inputs.kernel_version }}-android${{ github.event.inputs.android_version }})
