@@ -82,38 +82,25 @@ jobs:
           sudo apt install -y git curl make bc bison flex libssl-dev libelf-dev zip unzip \
             gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
 
-    
-      - name: 获取最新GKI并克隆
+      - name: 下载Google GKI内核
         run: |
-          ANDROID_VER=${{ inputs.android_version }}
-          KERNEL_VER=${{ inputs.kernel_version }}
-          PREFIX="android${ANDROID_VER}-${KERNEL_VER}"
-
-          # 获取最新小版本
-          LATEST_BRANCH=$(git ls-remote --heads https://android.googsource.com/kernel/common |
-                          grep "$PREFIX" |
-                          grep -E -- '-[0-9]{4}-[0-9]{2}$' |
-                          sort -V | tail -n1 | awk -F'/' '{print $3}')
-
-          echo "最新内核分支: $LATEST_BRANCH"
-          git clone --depth=1 https://android.googsource.com/kernel/common -b "$LATEST_BRANCH" common
+          git clone --depth=1 https://android.googlesource.com/kernel/common \
+            -b android${{ inputs.android_version }}-${{ inputs.kernel_version }} common
 
       - name: 去除dirty后缀 & ABI保护
         run: |
           rm -f common/android/abi_gki_protected_exports_*
           sed -i 's/ -dirty//g' common/scripts/setlocalversion
 
+      # ==============================================
+      # 打 SukiSU + 修复编译错误 写在一起！
+      # ==============================================
       - name: 集成 SukiSU Ultra
         run: |
           cd common
           curl -LSs https://raw.githubusercontent.com/ShirkNeko/SukiSU-Ultra/main/kernel/setup.sh | bash -s builtin
 
-      # ==============================================
-      # 自动修复 SukiSU 编译错误
-      # ==============================================
-      - name: 修复
-        run: |
-          cd common
+          
           sed -i 's/newcreds.cap_bset/newcreds->cap_bset/g' drivers/kernelsu/app_profile.c
           sed -i 's/setup_groups(&profile, cred)/setup_groups(&profile, newcreds)/g' drivers/kernelsu/app_profile.c
 
