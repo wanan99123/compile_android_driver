@@ -80,7 +80,8 @@ jobs:
       - name: 原生 make 编译驱动模块（不编译完整内核）
         run: |
           cd android-kernel
-          ARCH=${{ github.event.inputs.target_arch }}
+          # 关键修复：ARCH 用 arm64，CROSS_COMPILE 用 aarch64-linux-gnu-
+          ARCH=arm64
           CROSS_COMPILE=aarch64-linux-gnu-
           JOBS=$(nproc)
 
