@@ -1,0 +1,204 @@
+name: 一加 Ace6 SM8750 加速版 6.6 真OKI内核(全功能版)
+
+env:
+  TZ: Asia/Shanghai
+  ANDROID_VERSION: android15
+  KERNEL_VERSION: 6.6
+  CCACHE_KEY: ccache-ace6-sm8750-66
+
+on:
+  workflow_dispatch:
+    inputs:
+      ksu_type:
+        description: 'KernelSU类型(ReSukiSU/SukiSU/ksu/无)'
+        required: true
+        default: 'resukisu'
+        type: choice
+        options:
+          - 'resukisu'
+          - 'sukisu'
+          - 'ksu'
+          - 'none'
+
+      kpm_enable:
+        description: 'KPM(builtin内置KPM,false关闭)'
+        required: true
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'builtin'
+
+      susfs_enable:
+        description: '开启SUSFS增强隐藏'
+        required: true
+        default: 'true'
+        type: boolean
+
+      lz4_enable:
+        description: '开启LZ4+ZSTD压缩'
+        required: true
+        default: 'true'
+        type: boolean
+
+      bbr_enable:
+        description: 'BBR网络算法(false关闭/true开启/default默认)'
+        required: true
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+          - 'default'
+
+      better_net:
+        description: '网络扩展iptables/ipset'
+        required: true
+        default: 'true'
+        type: boolean
+
+      adios_enable:
+        description: 'ADIOS IO调度器'
+        required: true
+        default: 'true'
+        type: boolean
+
+      baseband_guard:
+        description: '基带保护(防格机)'
+        required: true
+        default: 'true'
+        type: boolean
+
+      ccache_update:
+        description: '更新编译缓存'
+        required: true
+        default: 'false'
+        type: boolean
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 安装依赖与工具
+        run: |
+          sudo apt update -qq
+          sudo apt install -y git ccache curl make bc bison flex libssl-dev libelf-dev zip unzip
+
+      - name: 下载一加 Ace6 SM8750 官方内核
+        run: |
+          git clone --depth=1 \
+            https://github.com/OnePlusOSS/android_kernel_oneplus_sm8750.git \
+            -b android15-6.6 \
+            common
+
+      - name: 配置 ccache 加速
+        run: |
+          echo "CCACHE_DIR=$HOME/.ccache_ace6" >> $GITHUB_ENV
+          echo "CCACHE_MAXSIZE=4G" >> $GITHUB_ENV
+          mkdir -p $CCACHE_DIR
+          ccache -M 4G
+          ccache -o compression=true
+
+      - name: 恢复缓存加速
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ${{ env.CCACHE_KEY }}-${{ runner.os }}
+
+      - name: 集成 KernelSU
+        run: |
+          cd common
+          if [[ "${{ inputs.ksu_type }}" == "resukisu" ]]; then
+            curl -LSs https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh | bash -s main
+          elif [[ "${{ inputs.ksu_type }}" == "sukisu" ]]; then
+            curl -LSs https://raw.githubusercontent.com/ShirkNeko/SukiSU-Ultra/main/kernel/setup.sh | bash -s builtin
+          elif [[ "${{ inputs.ksu_type }}" == "ksu" ]]; then
+            curl -LSs https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh | bash -s main
+          fi
+
+      - name: 集成 KPM
+        run: |
+          cd common
+          if [[ "${{ inputs.kpm_enable }}" == "builtin" ]]; then
+            curl -LSs https://raw.githubusercontent.com/587899/KPM/main/apply.sh | bash -s -- -k
+          fi
+
+      - name: 开始编译内核(仅boot)
+        run: |
+          cd common
+          ARCH=arm64
+          CROSS_COMPILE=aarch64-linux-gnu-
+          JOBS=$(nproc)
+          OUT=out
+          mkdir -p $OUT
+
+          make O=$OUT ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE sun_defconfig
+
+          # 开启KSU
+          if [[ "${{ inputs.ksu_type }}" != "none" ]]; then
+            scripts/config --file $OUT/.config -e CONFIG_KSU
+          fi
+
+          # 开启KPM
+          if [[ "${{ inputs.kpm_enable }}" == "builtin" ]]; then
+            scripts/config --file $OUT/.config -e CONFIG_KPM
+          fi
+
+          # 开启LZ4/ZSTD
+          if [[ "${{ inputs.lz4_enable }}" == "true" ]]; then
+            scripts/config --file $OUT/.config -e CONFIG_LZ4
+            scripts/config --file $OUT/.config -e CONFIG_ZSTD
+            scripts/config --file $OUT/.config -e CONFIG_CRYPTO_LZ4
+            scripts/config --file $OUT/.config -e CONFIG_CRYPTO_ZSTD
+          fi
+
+          # 开启BBR
+          if [[ "${{ inputs.bbr_enable }}" != "false" ]]; then
+            scripts/config --file $OUT/.config -e CONFIG_TCP_CONG_BBR
+            if [[ "${{ inputs.bbr_enable }}" == "default" ]]; then
+              scripts/config --file $OUT/.config --set-str CONFIG_DEFAULT_TCP_CONG bbr
+            fi
+          fi
+
+          # 网络扩展
+          if [[ "${{ inputs.better_net }}" == "true" ]]; then
+            scripts/config --file $OUT/.config -e CONFIG_NETFILTER_XT_SET
+            scripts/config --file $OUT/.config -e CONFIG_IP_SET
+          fi
+
+          # ADIOS IO调度
+          if [[ "${{ inputs.adios_enable }}" == "true" ]]; then
+            scripts/config --file $OUT/.config -e CONFIG_IOSCHED_ADIOS
+            scripts/config --file $OUT/.config --set-str CONFIG_DEFAULT_IOSCHED adios
+          fi
+
+          # 基带保护
+          if [[ "${{ inputs.baseband_guard }}" == "true" ]]; then
+            scripts/config --file $OUT/.config -e CONFIG_ALWAYS_DENY_DEV_MEM
+          fi
+
+          # 只编译内核Image，不编译任何ko驱动
+          make O=$OUT ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE -j$JOBS Image
+
+      - name: 提取 boot.img
+        run: |
+          cp common/out/arch/arm64/boot/Image ./boot.img
+
+      - name: 打包AnyKernel3卡刷包
+        run: |
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git
+          cp boot.img AnyKernel3/
+          cd AnyKernel3
+          zip -r9 ../Ace6_SM8750_boot.zip ./*
+
+      - name: 上传内核
+        uses: actions/upload-artifact@v4
+        with:
+          name: Ace6_SM8750_boot
+          path: |
+            boot.img
+            Ace6_SM8750_boot.zip
