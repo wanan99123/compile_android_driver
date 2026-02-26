@@ -92,11 +92,14 @@ jobs:
             OUT_DIR=$PWD/out
           fi
 
+          # 确保输出目录存在
+          mkdir -p "$OUT_DIR"
+
           # 生成默认配置
-          make O=$OUT_DIR ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE gki_defconfig
+          make O="$OUT_DIR" ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" gki_defconfig
 
           # 编译内核与模块
-          make O=$OUT_DIR ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE -j$(nproc)
+          make O="$OUT_DIR" ARCH="$ARCH" CROSS_COMPILE="$CROSS_COMPILE" -j$(nproc)
 
           echo "OUT_PATH=$OUT_DIR" >> $GITHUB_ENV
 
