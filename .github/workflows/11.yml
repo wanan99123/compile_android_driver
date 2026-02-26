@@ -77,10 +77,11 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: 安装依赖
+      - name: 安装依赖+交叉编译器
         run: |
           sudo apt update -qq
-          sudo apt install -y git curl make bc bison flex libssl-dev libelf-dev zip unzip
+          sudo apt install -y git curl make bc bison flex libssl-dev libelf-dev zip unzip \
+            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
 
       - name: 下载Google GKI内核
         run: |
@@ -111,7 +112,7 @@ jobs:
           # 开启KSU
           scripts/config --file $OUT/.config -e CONFIG_KSU
 
-          # 开启KPM（SukiSU内置，无需额外脚本）
+          # 开启KPM（SukiSU内置）
           if [[ "${{ inputs.kpm_enable }}" == "true" ]]; then
             scripts/config --file $OUT/.config -e CONFIG_KPM
           fi
