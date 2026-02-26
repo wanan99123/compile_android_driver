@@ -32,6 +32,9 @@ on:
         description: 架构
         required: true
         default: 'aarch64'
+        type: choice
+        options:
+          - 'aarch64'
 
 permissions:
   contents: write
@@ -45,111 +48,58 @@ jobs:
       - name: 准备驱动源码
         run: |
           mkdir -p kerneldriver
-          # 复制源码，忽略不存在的错误
-          cp -r ./code/* kerneldriver/ 2>/dev/null || echo "警告：未找到 ./code 目录，使用当前目录文件"
-          # 兜底：如果kerneldriver为空，检查当前目录是否有.c文件
-          if [ -z "$(ls -A kerneldriver)" ]; then
-            cp *.c *.h Makefile Kconfig kerneldriver/ 2>/dev/null
-          fi
+          cp -r ./code/* kerneldriver/ 2>/dev/null || cp *.c *.h Makefile Kconfig kerneldriver/ 2>/dev/null
           ls -la kerneldriver/
 
-      - name: 安装环境依赖 + Clang19 工具链
+      - name: 安装核心依赖（修复 aria2 包名 + 启用 universe 仓库）
         run: |
-          # 系统环境预处理
-          sudo apt-mark hold firefox libc-bin
-          sudo apt purge -y man-db
-          sudo rm -rf /var/lib/man-db/auto-update
+          # 启用 universe 仓库（解决部分依赖缺失）
+          sudo add-apt-repository -y universe
           sudo apt update -qq
-          # 修复aria2包名：正确包名是aria2，不是aria2c
+          # 正确安装包：aria2（命令是aria2c，包名是aria2）
           sudo apt install -y --no-install-recommends \
-            binutils python-is-python3 libssl-dev libelf-dev libdw-dev \
-            aria2 repo unzip
-          
-          # 安装目标最新版ccache v4.12.2
-          wget https://github.com/cctv18/oppo_oplus_realme_sm8850/raw/main/lib/ccache-x86-64 -O ccache
-          sudo cp -f ./ccache /usr/bin/ccache
-          sudo chmod +x /usr/bin/ccache
-          rm -f ./ccache
-          
-          # 创建工具链目录并下载全套编译工具
-          mkdir -p toolchain && cd toolchain
-          
-          # 下载并解压 Clang19 (r536225)
-          mkdir -p clang19
-          aria2c -s16 -x16 -k1M \
-            https://github.com/cctv18/oneplus_sm8650_toolchain/releases/download/LLVM-Clang19-r536225/clang-r536225.zip \
-            -o clang.zip
-          unzip -q clang.zip -d clang19
-          rm -f clang.zip
-          
-          # 下载并解压 Rust 1.82.0 工具链
-          mkdir -p rust
-          aria2c -s16 -x16 -k1M \
-            https://github.com/cctv18/oneplus_sm8650_toolchain/releases/download/LLVM-Clang19-r536225/rust.zip \
-            -o rust.zip
-          unzip -q rust.zip -d rust
-          rm -f rust.zip
-          
-          # 下载并解压 build-tools 辅助工具链
-          aria2c -s16 -x16 -k1M \
-            https://github.com/cctv18/oneplus_sm8650_toolchain/releases/download/LLVM-Clang19-r536225/build-tools.zip \
-            -o build-tools.zip
-          unzip -q build-tools.zip
-          rm -f build-tools.zip
-          
-          cd ..
-          echo "✅ 全套工具链部署完成"
+            aria2 repo unzip binutils python-is-python3 \
+            libssl-dev libelf-dev bc flex bison
 
-      - name: 下载 Android 内核源码
+      - name: 下载 Clang19 + Rust + build-tools 工具链
         run: |
-          sudo apt install -y repo
-          rm -rf android-kernel
-          mkdir -p android-kernel && cd android-kernel
-          # 完全使用你指定的源码拉取命令
+          mkdir -p toolchain && cd toolchain
+          # 下载 Clang19
+          aria2c -s16 -x16 -k1M https://github.com/cctv18/oneplus_sm8650_toolchain/releases/download/LLVM-Clang19-r536225/clang-r536225.zip -o clang.zip
+          unzip -q clang.zip -d clang19 && rm clang.zip
+          # 下载 Rust
+          aria2c -s16 -x16 -k1M https://github.com/cctv18/oneplus_sm8650_toolchain/releases/download/LLVM-Clang19-r536225/rust.zip -o rust.zip
+          unzip -q rust.zip -d rust && rm rust.zip
+          # 下载 build-tools
+          aria2c -s16 -x16 -k1M https://github.com/cctv18/oneplus_sm8650_toolchain/releases/download/LLVM-Clang19-r536225/build-tools.zip -o bt.zip
+          unzip -q bt.zip -d build-tools && rm bt.zip
+          # 配置工具链路径
+          echo "PATH=$PWD/clang19/bin:$PWD/build-tools/bin:$PWD/rust/bin:$PATH" >> $GITHUB_ENV
+
+      - name: 拉取内核源码（严格按你指定的命令）
+        run: |
+          rm -rf android-kernel && mkdir -p android-kernel && cd android-kernel
           repo init -u https://android.googlesource.com/kernel/manifest \
             -b common-android${{ github.event.inputs.android_version }}-${{ github.event.inputs.kernel_version }} \
             --depth=1
           repo sync -j$(nproc) -c --no-tags --optimized-fetch --force-sync
 
-      - name: 内核预处理
+      - name: 内核预处理 + 放入驱动
         run: |
           cd android-kernel
-          # 去除内核版本的 dirty 后缀
-          for f in common/scripts/setlocalversion; do
-            [ -f "$f" ] && sed -i 's/ -dirty//g' "$f"
-            [ -f "$f" ] && sed -i '$i res=$(echo "$res" | sed '\''s/-dirty//g'\'')' "$f"
-          done
-          echo "✅ 内核源码预处理完成"
+          # 去除 dirty 后缀
+          sed -i '/-dirty/d' common/scripts/setlocalversion 2>/dev/null
+          # 放入驱动
+          TARGET_DIR=common/drivers/kerneldriver
+          mkdir -p $TARGET_DIR
+          cp -r ../kerneldriver/* $TARGET_DIR/
+          # 配置 Makefile
+          sed -i '/kerneldriver/d' common/drivers/Makefile
+          echo "obj-m += kerneldriver/" >> common/drivers/Makefile
 
-      - name: 放入驱动到内核目录
+      - name: 配置编译环境变量
         run: |
-          # 自动适配内核目录结构
-          if [ -d "android-kernel/common" ]; then
-            TARGET_DIR="android-kernel/common/drivers/kerneldriver"
-          else
-            TARGET_DIR="android-kernel/drivers/kerneldriver"
-          fi
-          mkdir -p ${TARGET_DIR}
-          cp -r kerneldriver/* ${TARGET_DIR}/
-          echo "驱动已放入: ${TARGET_DIR}"
-          ls -la ${TARGET_DIR}/
-
-      - name: 配置 Makefile
-        run: |
-          cd android-kernel
-          if [ -d "common" ]; then
-            MAKEFILE="common/drivers/Makefile"
-          else
-            MAKEFILE="drivers/Makefile"
-          fi
-          sed -i '/kerneldriver/d' ${MAKEFILE}
-          echo "obj-m += kerneldriver/" >> ${MAKEFILE}
-          tail -n 5 ${MAKEFILE}
-
-      - name: 配置编译环境
-        run: |
-          echo "PATH=$PWD/toolchain/clang19/bin:$PWD/toolchain/build-tools/bin:$PWD/toolchain/rust/bin:$PATH" >> $GITHUB_ENV
-          echo "ARCH=arm64" >> $GITHUB_ENV
+          echo "ARCH=${{ github.event.inputs.target_arch }}" >> $GITHUB_ENV
           echo "CROSS_COMPILE=aarch64-linux-gnu-" >> $GITHUB_ENV
           echo "CC=clang" >> $GITHUB_ENV
           echo "LD=ld.lld" >> $GITHUB_ENV
@@ -158,45 +108,39 @@ jobs:
           echo "RUSTC=rustc" >> $GITHUB_ENV
           echo "CARGO=cargo" >> $GITHUB_ENV
 
-      - name: 编译内核与驱动
+      - name: 编译内核与驱动（纯 Make 方式）
         run: |
-          cd android-kernel
+          cd android-kernel/common
           make gki_defconfig
           scripts/config --enable MODULES
           scripts/config --enable MODULE_UNLOAD
           echo "CONFIG_GS_MEM=m" >> .config
+          # 先编译内核生成依赖文件
           make -j$(nproc)
-          if [ -d "common" ]; then
-            make M=common/drivers/kerneldriver modules -j$(nproc)
-          else
-            make M=drivers/kerneldriver modules -j$(nproc)
-          fi
+          # 编译驱动模块
+          make M=drivers/kerneldriver modules -j$(nproc)
 
-      - name: 提取驱动 .ko
+      - name: 提取驱动文件
         id: extract_ko
         run: |
-          KO_NAME="${{ github.event.inputs.driver_name }}"
-          KO_PATH=$(find android-kernel -name "$KO_NAME" -type f | head -1)
+          KO=${{ github.event.inputs.driver_name }}
+          KO_PATH=$(find android-kernel -name $KO -type f | head -1)
           if [ -z "$KO_PATH" ]; then
-            echo "❌ 找不到 $KO_NAME"
-            find android-kernel -name "*.ko" | head -20
+            echo "❌ 未找到驱动文件 $KO"
             exit 1
           fi
-          cp -v "$KO_PATH" ./
-          ls -lh ./$KO_NAME
-          echo "ko_path=./$KO_NAME" >> $GITHUB_OUTPUT
+          cp -v $KO_PATH ./
+          echo "ko_path=./$KO" >> $GITHUB_OUTPUT
 
-      - name: 上传构建产物
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: driver-${{ github.event.inputs.target_arch }}-${{ github.event.inputs.kernel_version }}-android${{ github.event.inputs.android_version }}
           path: ${{ steps.extract_ko.outputs.ko_path }}
 
-      - name: 创建 GitHub Release
+      - name: 创建 Release
         uses: softprops/action-gh-release@v2
         if: success()
         with:
-          name: ${{ github.event.inputs.driver_name }} (${{ github.event.inputs.kernel_version }}-Android${{ github.event.inputs.android_version }})
           tag_name: build-${{ github.event.inputs.kernel_version }}-android${{ github.event.inputs.android_version }}-${{ github.run_id }}
           files: ${{ steps.extract_ko.outputs.ko_path }}
           generate_release_notes: true
