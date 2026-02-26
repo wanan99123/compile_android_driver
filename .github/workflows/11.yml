@@ -1,4 +1,4 @@
-name: 自定义GKI内核构建(仅SukiSU·KPM专用·全功能)
+name: 自定义GKI内核构建
 
 env:
   TZ: Asia/Shanghai
