@@ -1,4 +1,4 @@
-name: 自定义GKI内核构建
+name: 自定义GKI内核构建(仅SukiSU·KPM专用·修复版)
 
 env:
   TZ: Asia/Shanghai
@@ -97,13 +97,6 @@ jobs:
           cd common
           curl -LSs https://raw.githubusercontent.com/ShirkNeko/SukiSU-Ultra/main/kernel/setup.sh | bash -s builtin
 
-      - name: 集成 KPM
-        run: |
-          cd common
-          if [[ "${{ inputs.kpm_enable }}" == "true" ]]; then
-            curl -LSs https://raw.githubusercontent.com/587899/KPM/main/apply.sh | bash -s -- -k
-          fi
-
       - name: 编译内核
         run: |
           cd common
@@ -118,7 +111,7 @@ jobs:
           # 开启KSU
           scripts/config --file $OUT/.config -e CONFIG_KSU
 
-          # 开启KPM
+          # 开启KPM（SukiSU内置，无需额外脚本）
           if [[ "${{ inputs.kpm_enable }}" == "true" ]]; then
             scripts/config --file $OUT/.config -e CONFIG_KPM
           fi
