@@ -1,13 +1,23 @@
-name: 一加 Ace6 专用 Google6.6 内核(无缓存·全功能)
+name: 自定义版本 通用GKI内核构建
 
 env:
   TZ: Asia/Shanghai
-  ANDROID_VERSION: 'android15'
-  KERNEL_VERSION: '6.6'
 
 on:
   workflow_dispatch:
     inputs:
+      android_version:
+        description: '安卓版本 (例如 android15)'
+        required: true
+        default: 'android15'
+        type: string
+
+      kernel_version:
+        description: '内核版本分支 (例如 android15-6.6)'
+        required: true
+        default: 'android15-6.6'
+        type: string
+
       ksu_type:
         description: 'KernelSU分支(ReSukiSU/SukiSU Ultra/KSU原版/无)'
         required: true
@@ -18,26 +28,36 @@ on:
           - 'sukisu'
           - 'ksu'
           - 'none'
+
+      susfs_enable:
+        description: '开启SUSFS增强隐藏'
+        required: true
+        type: boolean
+        default: 'true'
+
       kpm_enable:
-        description: '是否开启kPM(false关闭/builtin内置)'
+        description: 'KPM(builtin内置,false关闭)'
         required: true
         type: choice
         default: 'false'
         options:
           - 'false'
           - 'builtin'
-      susfs_enable:
-        description: '开启SUSFS增强隐藏'
-        required: true
-        type: boolean
-        default: true
+
       lz4_enable:
         description: '开启LZ4+ZSTD压缩'
         required: true
         type: boolean
-        default: true
+        default: 'true'
+
+      lz4kd_enable:
+        description: '开启LZ4KD'
+        required: true
+        type: boolean
+        default: 'false'
+
       bbr_enable:
-        description: 'BBR网络(false关/true开/default默认)'
+        description: 'BBR(false关,true开,default默认)'
         required: true
         type: choice
         default: 'false'
@@ -45,23 +65,33 @@ on:
           - 'false'
           - 'true'
           - 'default'
+
       better_net:
-        description: '开启网络扩展iptables/ipset'
+        description: '网络扩展iptables/ipset'
         required: true
         type: boolean
-        default: false
+        default: 'false'
+
       adios_enable:
-        description: '开启ADIOS IO调度'
+        description: 'ADIOS IO调度'
         required: true
         type: boolean
-        default: true
+        default: 'true'
+
+      rekernel_enable:
+        description: 'ReKernel应用冻结'
+        required: true
+        type: boolean
+        default: 'false'
+
       baseband_guard:
-        description: '开启基带保护(防格机)'
+        description: '基带保护防格机'
         required: true
         type: boolean
-        default: true
+        default: 'true'
+
       kernel_suffix:
-        description: '内核后缀(可不填)'
+        description: '内核后缀(可选)'
         required: false
         type: string
         default: ''
@@ -78,17 +108,23 @@ jobs:
           sudo apt update -qq
           sudo apt install -y git curl make bc bison flex libssl-dev libelf-dev zip unzip
 
-      - name: 下载 Google 官方 android15-6.6 内核
+      - name: 下载 Google GKI 内核
         run: |
-          git clone --depth=1 https://android.googlesource.com/kernel/common -b android15-6.6 common
+          git clone --depth=1 https://android.googlesource.com/kernel/common -b ${{ inputs.kernel_version }} common
+
+      - name: 去除 dirty 后缀 & ABI 保护
+        run: |
+          rm -f common/android/abi_gki_protected_exports_*
+          sed -i 's/ -dirty//g' common/scripts/setlocalversion
 
       - name: 集成 KernelSU
         run: |
           cd common
-          if [[ "${{ inputs.ksu_type }}" == "resukisu" ]]; then
-            curl -LSs https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh | bash -s main
-          elif [[ "${{ inputs.ksu_type }}" == "sukisu" ]]; then
+          if [[ "${{ inputs.ksu_type }}" == "sukisu" ]]; then
             curl -LSs https://raw.githubusercontent.com/ShirkNeko/SukiSU-Ultra/main/kernel/setup.sh | bash -s builtin
+          elif [[ "${{ inputs.ksu_type }}" == "resukisu" ]]; then
+            curl -LSs https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh | bash -s main
+            echo 'CONFIG_KSU_FULL_NAME_FORMAT="%TAG_NAME%-%COMMIT_SHA%@cctv18"' >> arch/arm64/configs/gki_defconfig
           elif [[ "${{ inputs.ksu_type }}" == "ksu" ]]; then
             curl -LSs https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh | bash -s main
           fi
@@ -100,7 +136,7 @@ jobs:
             curl -LSs https://raw.githubusercontent.com/587899/KPM/main/apply.sh | bash -s -- -k
           fi
 
-      - name: 编译内核(仅boot·不编译任何ko)
+      - name: 编译内核
         run: |
           cd common
           ARCH=arm64
@@ -117,7 +153,7 @@ jobs:
           fi
 
           # KPM
-          if [[ "${{ inputs.kpm_enable }}" == "builtin" ]]; then
+          if [[ "${{ inputs.kpm_enable }}" != "false" ]]; then
             scripts/config --file $OUT/.config -e CONFIG_KPM
           fi
 
@@ -143,7 +179,7 @@ jobs:
             scripts/config --file $OUT/.config -e CONFIG_IP_SET
           fi
 
-          # ADIOS IO调度
+          # ADIOS IO 调度
           if [[ "${{ inputs.adios_enable }}" == "true" ]]; then
             scripts/config --file $OUT/.config -e CONFIG_IOSCHED_ADIOS
             scripts/config --file $OUT/.config --set-str CONFIG_DEFAULT_IOSCHED adios
@@ -154,24 +190,23 @@ jobs:
             scripts/config --file $OUT/.config -e CONFIG_ALWAYS_DENY_DEV_MEM
           fi
 
-          # 只编译内核，不编译任何模块
           make O=$OUT ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE -j$JOBS Image
 
       - name: 提取 boot.img
         run: |
           cp common/out/arch/arm64/boot/Image ./boot.img
 
-      - name: 打包 Recovery 卡刷包
+      - name: 打包 AnyKernel3
         run: |
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git
           cp boot.img AnyKernel3/
           cd AnyKernel3
-          zip -r9 ../Boot_Android15_6.6_GKI.zip ./*
+          zip -r9 ../GKI_boot.zip ./*
 
       - name: 上传内核
         uses: actions/upload-artifact@v4
         with:
-          name: Boot_Android15_6.6
+          name: GKI_BOOT
           path: |
             boot.img
-            Boot_Android15_6.6_GKI.zip
+            GKI_boot.zip
