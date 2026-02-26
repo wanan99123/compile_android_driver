@@ -1,4 +1,4 @@
-name: Android 内核驱动编译(make - 完整内核)
+name: Android 内核驱动编译(完整内核)
 on:
   workflow_dispatch:
     inputs:
@@ -47,7 +47,7 @@ jobs:
           mkdir -p kerneldriver
           cp ./code/* kerneldriver/ 2>/dev/null || true
 
-      - name: 下载 Android 内核源码 (repo 方式)
+      - name: 下载 Android 内核源码
         run: |
           sudo apt install -y repo
           rm -rf android-kernel
@@ -57,67 +57,54 @@ jobs:
             --depth=1
           repo sync -j$(nproc) -c --no-tags --optimized-fetch --force-sync
 
-      - name: 放入驱动到内核目录
+      - name: 放入驱动到内核
         run: |
-          BASE=drivers/kerneldriver
-          [ -d android-kernel/common ] && BASE=common/$BASE
-          mkdir -p android-kernel/$BASE
-          cp -r kerneldriver/* android-kernel/$BASE
+          cd android-kernel
+          mkdir -p common/drivers/kerneldriver
+          cp -r ../kerneldriver/* common/drivers/kerneldriver/
 
       - name: 配置 Makefile
         run: |
-          MF=drivers/Makefile
-          [ -d android-kernel/common ] && MF=common/$MF
           cd android-kernel
-          sed -i '/kerneldriver/d' $MF
-          echo "obj-m += kerneldriver/" >> $MF
+          sed -i '/kerneldriver/d' common/drivers/Makefile
+          echo "obj-m += kerneldriver/" >> common/drivers/Makefile
 
       - name: 安装编译依赖
         run: |
           sudo apt update -qq
           sudo apt install -y build-essential flex bison libssl-dev libelf-dev bc gcc-aarch64-linux-gnu python-is-python3
 
-      - name: 完整编译内核与驱动模块
+      - name: 完整编译内核 + 驱动模块
         run: |
-          cd android-kernel
-          # 关键：ARCH 用 arm64，CROSS_COMPILE 用 aarch64-linux-gnu-
+          cd android-kernel/common
           ARCH=arm64
           CROSS_COMPILE=aarch64-linux-gnu-
           JOBS=$(nproc)
-          OUT_DIR=$PWD/out
+          OUT=out
 
-          # 进入 common 子目录（repo 下载的源码通常在这里）
-          if [ -d common ]; then
-            cd common
-            OUT_DIR=$PWD/out
-          fi
+          mkdir -p $OUT
 
-          # 确保输出目录存在
-          mkdir -p "$OUT_DIR"
+          # 生成配置
+          make O=$OUT ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE gki_defconfig
 
-          # 1. 生成 GKI 默认配置
-          make O="$OUT_DIR" ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE gki_defconfig
+          # 编译内核
+          make O=$OUT ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE -j$JOBS Image
 
-          # 2. 完整编译内核（Image）和所有模块（包括你的驱动）
-          make O="$OUT_DIR" ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE -j$JOBS Image modules
+          # 只编译你的驱动
+          make O=$OUT ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE M=drivers/kerneldriver -j$JOBS modules
 
-          echo "OUT_PATH=$OUT_DIR" >> $GITHUB_ENV
+          echo "OUT_DIR=$PWD/$OUT" >> $GITHUB_ENV
 
-      - name: 提取驱动 .ko
+      - name: 提取 .ko
         id: extract_ko
         run: |
           KO_NAME="${{ github.event.inputs.driver_name }}"
-          OUT_PATH="${{ env.OUT_PATH }}"
-
-          # 在输出目录中查找驱动模块
-          KO_PATH=$(find "$OUT_PATH" -name "$KO_NAME" -type f | head -1)
-
+          KO_PATH=$(find ${{ env.OUT_DIR }} -name "$KO_NAME" | head -1)
           if [ -z "$KO_PATH" ]; then
-            echo "Error: $KO_NAME not found!"
+            echo "❌ 找不到 $KO_NAME"
             exit 1
           fi
-
-          cp -v "$KO_PATH" ./
+          cp "$KO_PATH" ./
           echo "ko_path=./$KO_NAME" >> $GITHUB_OUTPUT
 
       - uses: actions/upload-artifact@v4
