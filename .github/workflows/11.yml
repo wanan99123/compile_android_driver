@@ -1,51 +1,43 @@
-name: 一加 Ace6 SM8750 加速版 6.6 真OKI内核(全功能版)
+name: 一加 Ace6 专用 Google6.6 内核(无缓存·全功能)
 
 env:
   TZ: Asia/Shanghai
   ANDROID_VERSION: 'android15'
   KERNEL_VERSION: '6.6'
-  CCACHE_KEY: ccache-gki-66-android15
 
 on:
   workflow_dispatch:
     inputs:
       ksu_type:
-        description: 'KernelSU分支(ReSukiSU/SukiSU Ultra/KernelSU Next/KSU(原版)/无内置KSU,默认ReSukiSU)'
+        description: 'KernelSU分支(ReSukiSU/SukiSU Ultra/KSU原版/无)'
         required: true
         type: choice
         default: 'resukisu'
         options:
           - 'resukisu'
           - 'sukisu'
-          - 'ksunext'
           - 'ksu'
           - 'none'
-      susfs_enable:
-        description: '是否开启susfs(用于增强隐藏环境挂载功能; 可能轻微增加耗电，上游更新导致不稳定时或不需要可关闭)'
-        required: true
-        type: boolean
-        default: 'true'
       kpm_enable:
-        description: '是否开启kpm(builtin-使用(re)sukisu内置kpm, kpn-使用独立kpm实现(支持任意KSU/面具环境); 不需要可保持默认关闭)'
+        description: '是否开启kPM(false关闭/builtin内置)'
         required: true
         type: choice
         default: 'false'
         options:
           - 'false'
           - 'builtin'
-          - 'kpn'
+      susfs_enable:
+        description: '开启SUSFS增强隐藏'
+        required: true
+        type: boolean
+        default: true
       lz4_enable:
-        description: '是否安装 lz4 1.10.0+zstd 1.5.7 补丁及 LZ4KD 补丁'
+        description: '开启LZ4+ZSTD压缩'
         required: true
         type: boolean
-        default: 'true'
-      lz4kd_enable:
-        description: '是否安装 LZ4KD 补丁(若已开启lz4+zstd补丁则可不开启)'
-        required: true
-        type: boolean
-        default: 'false'
+        default: true
       bbr_enable:
-        description: "是否启用bbr算法(优化上行数据,对手机日用无太大意义甚至可能负优化;false关闭,true仅加入算法,default启用算法并设为默认)"
+        description: 'BBR网络(false关/true开/default默认)'
         required: true
         type: choice
         default: 'false'
@@ -54,76 +46,41 @@ on:
           - 'true'
           - 'default'
       better_net:
-        description: '是否开启网络功能拓展配置(用于为ipset及需要iptables等高级网络功能内核支持的程序提供支持)'
+        description: '开启网络扩展iptables/ipset'
         required: true
         type: boolean
-        default: 'false'
+        default: false
       adios_enable:
-        description: '是否启用ADIOS IO调度器支持(提升IO读写性能)'
+        description: '开启ADIOS IO调度'
         required: true
         type: boolean
-        default: 'true'
-      rekernel_enable:
-        description: '是否启用Re-Kernel支持(与Freezer/NoActive等软件配合, 提升应用冻结能力)'
-        required: true
-        type: boolean
-        default: 'false'
+        default: true
       baseband_guard:
-        description: '是否开启内核级基带保护(阻止一切对非用户分区的写入，有效防止格机)'
+        description: '开启基带保护(防格机)'
         required: true
         type: boolean
-        default: 'true'
-      ccache_update:
-        description: '更新ccache缓存(将本次编译生成的ccache缓存覆盖至仓库缓存，在更改编译配置、源码或需要刷新缓存时开启)'
-        required: true
-        type: boolean
-        default: 'false'
-      ccache_debug:
-        description: '是否上传 Ccache调试日志(用于调试, 无需要不必开启)'
-        required: true
-        type: boolean
-        default: 'false'
+        default: true
       kernel_suffix:
-        description: '内核后缀(留空默认,开头别加连字符,勿加空格等影响指令运行的保留字符)'
+        description: '内核后缀(可不填)'
         required: false
         type: string
         default: ''
 
 permissions:
-  actions: write
   contents: read
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    outputs:
-      ksuver: ${{ steps.ksu_version.outputs.ksuver }}
     steps:
       - name: 安装依赖
         run: |
           sudo apt update -qq
-          sudo apt install -y git ccache curl make bc bison flex libssl-dev libelf-dev zip unzip aria2
+          sudo apt install -y git curl make bc bison flex libssl-dev libelf-dev zip unzip
 
-      - name: 下载 Google 官方 android15-6.6 最新内核
+      - name: 下载 Google 官方 android15-6.6 内核
         run: |
-          git clone --depth=1 \
-            https://android.googlesource.com/kernel/common \
-            -b android15-6.6 \
-            common
-
-      - name: 配置 ccache 加速
-        run: |
-          echo "CCACHE_DIR=$HOME/.ccache_gki66" >> $GITHUB_ENV
-          echo "CCACHE_MAXSIZE=4G" >> $GITHUB_ENV
-          mkdir -p $CCACHE_DIR
-          ccache -M 4G
-          ccache -o compression=true
-
-      - name: 恢复缓存
-        uses: actions/cache@v4
-        with:
-          path: ${{ env.CCACHE_DIR }}
-          key: ${{ env.CCACHE_KEY }}-${{ runner.os }}
+          git clone --depth=1 https://android.googlesource.com/kernel/common -b android15-6.6 common
 
       - name: 集成 KernelSU
         run: |
@@ -143,7 +100,7 @@ jobs:
             curl -LSs https://raw.githubusercontent.com/587899/KPM/main/apply.sh | bash -s -- -k
           fi
 
-      - name: 编译内核（仅 Image，不编译任何 ko）
+      - name: 编译内核(仅boot·不编译任何ko)
         run: |
           cd common
           ARCH=arm64
@@ -154,12 +111,12 @@ jobs:
 
           make O=$OUT ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE gki_defconfig
 
-          # 开启 KSU
+          # KSU
           if [[ "${{ inputs.ksu_type }}" != "none" ]]; then
             scripts/config --file $OUT/.config -e CONFIG_KSU
           fi
 
-          # 开启 KPM
+          # KPM
           if [[ "${{ inputs.kpm_enable }}" == "builtin" ]]; then
             scripts/config --file $OUT/.config -e CONFIG_KPM
           fi
@@ -186,7 +143,7 @@ jobs:
             scripts/config --file $OUT/.config -e CONFIG_IP_SET
           fi
 
-          # ADIOS IO 调度
+          # ADIOS IO调度
           if [[ "${{ inputs.adios_enable }}" == "true" ]]; then
             scripts/config --file $OUT/.config -e CONFIG_IOSCHED_ADIOS
             scripts/config --file $OUT/.config --set-str CONFIG_DEFAULT_IOSCHED adios
@@ -204,17 +161,17 @@ jobs:
         run: |
           cp common/out/arch/arm64/boot/Image ./boot.img
 
-      - name: 打包 AnyKernel3
+      - name: 打包 Recovery 卡刷包
         run: |
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git
           cp boot.img AnyKernel3/
           cd AnyKernel3
-          zip -r9 ../GKI_6.6_Android15_boot.zip ./*
+          zip -r9 ../Boot_Android15_6.6_GKI.zip ./*
 
-      - name: 上传最终内核
+      - name: 上传内核
         uses: actions/upload-artifact@v4
         with:
-          name: GKI_6.6_Android15_BOOT
+          name: Boot_Android15_6.6
           path: |
             boot.img
-            GKI_6.6_Android15_boot.zip
+            Boot_Android15_6.6_GKI.zip
