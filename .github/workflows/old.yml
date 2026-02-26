@@ -27,7 +27,7 @@ on:
       driver_name:
         description: 驱动名（.ko）
         required: true
-        default: 'gs_mem.ko'
+        default: 'TearGame_Driver.ko'
       target_arch:
         description: 架构
         required: true
