@@ -27,7 +27,7 @@ on:
       driver_name:
         description: 驱动名（.ko）
         required: true
-        default: 'TearGame_Driver.ko'
+        default: 'gs_mem.ko'
       target_arch:
         description: 架构
         required: true
@@ -51,7 +51,6 @@ jobs:
           fi
           ls -la kerneldriver/
 
-      # 安装依赖 + 直接用他的 Clang19 + Rust + build-tools
       - name: 安装环境依赖 + Clang19 工具链
         run: |
           sudo apt-mark hold firefox libc-bin
@@ -89,7 +88,6 @@ jobs:
           cd ..
           echo "工具链部署完成"
 
-      # 你要的源码拉取方式，原样保留
       - name: 下载 Android 内核源码
         run: |
           sudo apt install -y repo
@@ -100,7 +98,6 @@ jobs:
             --depth=1
           repo sync -j$(nproc) -c --no-tags --optimized-fetch --force-sync
 
-      # 去除 dirty 后缀（他的操作）
       - name: 内核预处理
         run: |
           cd android-kernel
@@ -133,7 +130,6 @@ jobs:
           echo "obj-m += kerneldriver/" >> ${MAKEFILE}
           tail -n 5 ${MAKEFILE}
 
-      # 环境变量：用他的全套工具
       - name: 配置编译环境
         run: |
           echo "PATH=$PWD/toolchain/clang19/bin:$PWD/toolchain/build-tools/bin:$PWD/toolchain/rust/bin:$PATH" >> $GITHUB_ENV
@@ -146,7 +142,6 @@ jobs:
           echo "RUSTC=rustc" >> $GITHUB_ENV
           echo "CARGO=cargo" >> $GITHUB_ENV
 
-      # 纯 make 编译，不用 bazel / build.sh
       - name: 编译内核与驱动
         run: |
           cd android-kernel
@@ -182,7 +177,7 @@ jobs:
           path: ${{ steps.extract_ko.outputs.ko_path }}
 
       - name: 创建 GitHub Release
-        uses: softprops/softprops/github-action-github-release@v2
+        uses: softprops/action-gh-release@v2
         if: success()
         with:
           name: ${{ github.event.inputs.driver_name }} (${{ github.event.inputs.kernel_version }}-Android${{ github.event.inputs.android_version }})
