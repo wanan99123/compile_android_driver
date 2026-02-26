@@ -1,4 +1,4 @@
-name: Android 内核驱动编译
+name: Android 内核驱动编译(make+clang18)
 on:
   workflow_dispatch:
     inputs:
@@ -47,109 +47,71 @@ jobs:
           mkdir -p kerneldriver
           cp ./code/* kerneldriver/ 2>/dev/null || true
 
-      - name: 下载 Android 内核源码
+      - name: 下载内核源码
         run: |
-          sudo apt install -y repo
-          rm -rf android-kernel
-          mkdir -p android-kernel && cd android-kernel
-          repo init -u https://android.googlesource.com/kernel/manifest \
-            -b common-android${{ github.event.inputs.android_version }}-${{ github.event.inputs.kernel_version }} \
-            --depth=1
-          repo sync -j$(nproc) -c --no-tags --optimized-fetch --force-sync
+          git clone --depth=1 -b android-${{ github.event.inputs.android_version }}-${{ github.event.inputs.kernel_version }} \
+            https://android.googlesource.com/kernel/common android-kernel
 
-      - name: 放入驱动到内核目录
+      - name: 下载 Clang 18
         run: |
-          BASE=drivers/kerneldriver
-          [ -d android-kernel/common ] && BASE=common/$BASE
-          mkdir -p android-kernel/$BASE
-          cp -r kerneldriver/* android-kernel/$BASE
+          mkdir -p android-clang
+          cd android-clang
+          wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r510928.tar.gz
+          tar xf clang-r510928.tar.gz
+          echo "CLANG_PATH=$PWD" >> $GITHUB_ENV
+
+      - name: 放入驱动
+        run: |
+          mkdir -p android-kernel/drivers/kerneldriver
+          cp -r kerneldriver/* android-kernel/drivers/kerneldriver/
 
       - name: 配置 Makefile
         run: |
-          MF=drivers/Makefile
-          [ -d android-kernel/common ] && MF=common/$MF
           cd android-kernel
-          sed -i '/kerneldriver/d' $MF
-          echo "obj-m += kerneldriver/" >> $MF
+          sed -i '/kerneldriver/d' drivers/Makefile
+          echo "obj-m += kerneldriver/" >> drivers/Makefile
 
-      - name: 注册模块到 GKI
-        run: |
-          cd android-kernel
-          ARCH=${{ github.event.inputs.target_arch }}
-          ANDROID_VER=${{ github.event.inputs.android_version }}
-          MOD="drivers/kerneldriver/${{ github.event.inputs.driver_name }}"
-
-          if [ "$ANDROID_VER" -le 13 ]; then
-            MOD_FILE="common/android/gki_${ARCH}_modules"
-            sed -i '/kerneldriver/d' "$MOD_FILE"
-            echo "$MOD" >> "$MOD_FILE"
-          else
-            BZL_FILE="common/modules.bzl"
-            awk -i inplace -v m="$MOD" '
-            BEGIN { added=0 }
-            /_COMMON_GKI_MODULES_LIST = \[/ { in_list=1 }
-            in_list && /\]/ {
-              if (!added) {
-                print "    \"" m "\","
-                added=1
-              }
-              in_list=0
-            }
-            { print }
-            ' "$BZL_FILE"
-          fi
-
-      - name: 安装编译依赖
+      - name: 安装依赖
         run: |
           sudo apt update -qq
-          sudo apt install -y build-essential flex bison libssl-dev libelf-dev bc gcc-aarch64-linux-gnu python-is-python3
+          sudo apt install -y build-essential flex bison libssl-dev libelf-dev bc gcc-aarch64-linux-gnu
 
-      - name: 编译内核与驱动
+      - name: 编译驱动（Clang 18）
         run: |
           cd android-kernel
-          export KMI_STRICT_MODE=0
-          ANDROID_VER=${{ github.event.inputs.android_version }}
-          ARCH=${{ github.event.inputs.target_arch }}
-          KERNEL_VER=${{ github.event.inputs.kernel_version }}
+          ARCH=arm64
+          CLANG_PATH=${{ env.CLANG_PATH }}
+          CROSS_COMPILE=aarch64-linux-gnu-
 
-          if [ "$ANDROID_VER" -le 13 ]; then
-            BUILD_CONFIG=common/build.config.gki.${ARCH} LTO=thin build/build.sh -j32
-            OUT_PATH="out/android${ANDROID_VER}-${KERNEL_VER}/dist"
-          else
-            tools/bazel run //common:kernel_${ARCH}_dist
-            OUT_PATH="out/kernel_${ARCH}/dist"
-          fi
+          make ARCH=$ARCH \
+            CC=$CLANG_PATH/bin/clang \
+            LD=$CLANG_PATH/bin/ld.lld \
+            AR=$CLANG_PATH/bin/llvm-ar \
+            NM=$CLANG_PATH/bin/llvm-nm \
+            OBJCOPY=$CLANG_PATH/bin/llvm-objcopy \
+            OBJDUMP=$CLANG_PATH/bin/llvm-objdump \
+            CROSS_COMPILE=$CROSS_COMPILE \
+            gki_defconfig
 
-          echo "OUT_PATH=$OUT_PATH" >> $GITHUB_ENV
+          make ARCH=$ARCH \
+            CC=$CLANG_PATH/bin/clang \
+            LD=$CLANG_PATH/bin/ld.lld \
+            CROSS_COMPILE=$CROSS_COMPILE \
+            modules -j$(nproc)
 
-      - name: 提取驱动 .ko
+      - name: 提取 .ko
         id: extract_ko
         run: |
           KO_NAME="${{ github.event.inputs.driver_name }}"
-          BASE_DIR="android-kernel"
-          DIST_PATH="${BASE_DIR}/${{ env.OUT_PATH }}/${KO_NAME}"
-          SEARCH_PATH="${BASE_DIR}/out"
-
-          if [ -f "${DIST_PATH}" ]; then
-            cp -v "${DIST_PATH}" .
-          else
-            KO_PATH=$(find "${SEARCH_PATH}" -name "${KO_NAME}" -type f | head -1)
-            if [ -n "${KO_PATH}" ]; then
-              cp -v "${KO_PATH}" .
-            else
-              echo "Error: ${KO_NAME} not found!"
-              exit 1
-            fi
-          fi
-
-          echo "ko_path=./${KO_NAME}" >> $GITHUB_OUTPUT
+          find android-kernel -name "$KO_NAME" -type f | head -1 | xargs cp -t .
+          echo "ko_path=./$KO_NAME" >> $GITHUB_OUTPUT
 
       - uses: actions/upload-artifact@v4
         with:
           name: driver-${{ github.event.inputs.target_arch }}-${{ github.event.inputs.kernel_version }}-android${{ github.event.inputs.android_version }}
           path: ${{ steps.extract_ko.outputs.ko_path }}
 
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/gh-release@v2
         if: success()
         with:
           name: ${{ github.event.inputs.driver_name }} (${{ github.event.inputs.kernel_version }}-android${{ github.event.inputs.android_version }})
