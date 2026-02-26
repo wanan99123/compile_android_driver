@@ -51,27 +51,25 @@ jobs:
           cp -r ./code/* kerneldriver/ 2>/dev/null || cp *.c *.h Makefile Kconfig kerneldriver/ 2>/dev/null
           ls -la kerneldriver/
 
-      - name: 安装核心依赖（修复 aria2 包名 + 启用 universe 仓库）
+      - name: 安装核心依赖（改用 wget，彻底绕开 aria2 问题）
         run: |
-          # 启用 universe 仓库（解决部分依赖缺失）
           sudo add-apt-repository -y universe
           sudo apt update -qq
-          # 正确安装包：aria2（命令是aria2c，包名是aria2）
           sudo apt install -y --no-install-recommends \
-            aria2 repo unzip binutils python-is-python3 \
+            wget repo unzip binutils python-is-python3 \
             libssl-dev libelf-dev bc flex bison
 
-      - name: 下载 Clang19 + Rust + build-tools 工具链
+      - name: 下载 Clang19 + Rust + build-tools 工具链（用 wget）
         run: |
           mkdir -p toolchain && cd toolchain
           # 下载 Clang19
-          aria2c -s16 -x16 -k1M https://github.com/cctv18/oneplus_sm8650_toolchain/releases/download/LLVM-Clang19-r536225/clang-r536225.zip -o clang.zip
+          wget -q https://github.com/cctv18/oneplus_sm8650_toolchain/releases/download/LLVM-Clang19-r536225/clang-r536225.zip -O clang.zip
           unzip -q clang.zip -d clang19 && rm clang.zip
           # 下载 Rust
-          aria2c -s16 -x16 -k1M https://github.com/cctv18/oneplus_sm8650_toolchain/releases/download/LLVM-Clang19-r536225/rust.zip -o rust.zip
+          wget -q https://github.com/cctv18/oneplus_sm8650_toolchain/releases/download/LLVM-Clang19-r536225/rust.zip -O rust.zip
           unzip -q rust.zip -d rust && rm rust.zip
           # 下载 build-tools
-          aria2c -s16 -x16 -k1M https://github.com/cctv18/oneplus_sm8650_toolchain/releases/download/LLVM-Clang19-r536225/build-tools.zip -o bt.zip
+          wget -q https://github.com/cctv18/oneplus_sm8650_toolchain/releases/download/LLVM-Clang19-r536225/build-tools.zip -o bt.zip
           unzip -q bt.zip -d build-tools && rm bt.zip
           # 配置工具链路径
           echo "PATH=$PWD/clang19/bin:$PWD/build-tools/bin:$PWD/rust/bin:$PATH" >> $GITHUB_ENV
