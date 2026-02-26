@@ -1,4 +1,4 @@
-name: 自定义GKI内核构建(仅SukiSU·KPM专用)
+name: 自定义GKI内核构建(仅SukiSU·KPM专用·全功能)
 
 env:
   TZ: Asia/Shanghai
@@ -24,6 +24,12 @@ on:
         type: boolean
         default: true
 
+      susfs_enable:
+        description: '开启SUSFS增强隐藏环境挂载'
+        required: true
+        type: boolean
+        default: true
+
       lz4_enable:
         description: '开启LZ4+ZSTD压缩优化'
         required: true
@@ -40,11 +46,23 @@ on:
           - 'true'
           - 'default'
 
+      better_net:
+        description: '开启网络功能拓展(iptables/ipset)'
+        required: true
+        type: boolean
+        default: false
+
       adios_enable:
         description: '启用ADIOS IO调度'
         required: true
         type: boolean
         default: true
+
+      rekernel_enable:
+        description: '启用Re-Kernel应用冻结支持'
+        required: true
+        type: boolean
+        default: false
 
       baseband_guard:
         description: '内核级基带保护(防格机)'
@@ -97,12 +115,20 @@ jobs:
 
           make O=$OUT ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE gki_defconfig
 
+          # 开启KSU
           scripts/config --file $OUT/.config -e CONFIG_KSU
 
+          # 开启KPM
           if [[ "${{ inputs.kpm_enable }}" == "true" ]]; then
             scripts/config --file $OUT/.config -e CONFIG_KPM
           fi
 
+          # SUSFS
+          if [[ "${{ inputs.susfs_enable }}" == "true" ]]; then
+            scripts/config --file $OUT/.config -e CONFIG_SUSFS
+          fi
+
+          # LZ4+ZSTD
           if [[ "${{ inputs.lz4_enable }}" == "true" ]]; then
             scripts/config --file $OUT/.config -e CONFIG_LZ4
             scripts/config --file $OUT/.config -e CONFIG_ZSTD
@@ -110,6 +136,7 @@ jobs:
             scripts/config --file $OUT/.config -e CONFIG_CRYPTO_ZSTD
           fi
 
+          # BBR
           if [[ "${{ inputs.bbr_enable }}" != "false" ]]; then
             scripts/config --file $OUT/.config -e CONFIG_TCP_CONG_BBR
             if [[ "${{ inputs.bbr_enable }}" == "default" ]]; then
@@ -117,11 +144,24 @@ jobs:
             fi
           fi
 
+          # 网络扩展
+          if [[ "${{ inputs.better_net }}" == "true" ]]; then
+            scripts/config --file $OUT/.config -e CONFIG_NETFILTER_XT_SET
+            scripts/config --file $OUT/.config -e CONFIG_IP_SET
+          fi
+
+          # ADIOS
           if [[ "${{ inputs.adios_enable }}" == "true" ]]; then
             scripts/config --file $OUT/.config -e CONFIG_IOSCHED_ADIOS
             scripts/config --file $OUT/.config --set-str CONFIG_DEFAULT_IOSCHED adios
           fi
 
+          # ReKernel
+          if [[ "${{ inputs.rekernel_enable }}" == "true" ]]; then
+            scripts/config --file $OUT/.config -e CONFIG_REKERNEL
+          fi
+
+          # 基带保护
           if [[ "${{ inputs.baseband_guard }}" == "true" ]]; then
             scripts/config --file $OUT/.config -e CONFIG_ALWAYS_DENY_DEV_MEM
           fi
