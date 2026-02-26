@@ -1,4 +1,4 @@
-name: Android 内核驱动编译(make)
+name: Android 内核驱动编译(make - 完整内核)
 on:
   workflow_dispatch:
     inputs:
@@ -77,37 +77,40 @@ jobs:
           sudo apt update -qq
           sudo apt install -y build-essential flex bison libssl-dev libelf-dev bc gcc-aarch64-linux-gnu python-is-python3
 
-      - name: 原生 make 编译驱动模块（不编译完整内核）
+      - name: 完整编译内核与驱动模块
         run: |
           cd android-kernel
-          # 关键修复：ARCH 用 arm64，CROSS_COMPILE 用 aarch64-linux-gnu-
+          # 关键：ARCH 用 arm64，CROSS_COMPILE 用 aarch64-linux-gnu-
           ARCH=arm64
           CROSS_COMPILE=aarch64-linux-gnu-
           JOBS=$(nproc)
+          OUT_DIR=$PWD/out
 
           # 进入 common 子目录（repo 下载的源码通常在这里）
           if [ -d common ]; then
             cd common
+            OUT_DIR=$PWD/out
           fi
 
-          # 1. 生成默认配置
-          make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE gki_defconfig
+          # 确保输出目录存在
+          mkdir -p "$OUT_DIR"
 
-          # 2. 只准备模块编译环境（关键优化）
-          make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE modules_prepare
+          # 1. 生成 GKI 默认配置
+          make O="$OUT_DIR" ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE gki_defconfig
 
-          # 3. 只编译驱动目录下的模块
-          make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE M=drivers/kerneldriver -j$JOBS modules
+          # 2. 完整编译内核（Image）和所有模块（包括你的驱动）
+          make O="$OUT_DIR" ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE -j$JOBS Image modules
 
-          # 4. 验证编译结果
-          echo "=== 编译完成的驱动模块 ==="
-          find drivers/kerneldriver -name "*.ko" -type f | xargs ls -lh
+          echo "OUT_PATH=$OUT_DIR" >> $GITHUB_ENV
 
       - name: 提取驱动 .ko
         id: extract_ko
         run: |
           KO_NAME="${{ github.event.inputs.driver_name }}"
-          KO_PATH=$(find android-kernel -name "$KO_NAME" -type f | head -1)
+          OUT_PATH="${{ env.OUT_PATH }}"
+
+          # 在输出目录中查找驱动模块
+          KO_PATH=$(find "$OUT_PATH" -name "$KO_NAME" -type f | head -1)
 
           if [ -z "$KO_PATH" ]; then
             echo "Error: $KO_NAME not found!"
