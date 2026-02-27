@@ -1,4 +1,4 @@
-name: GKI 6.6 A16 • SukiSU + KPM • 大佬同款打补丁
+name: GKI 6.6 A16 • SukiSU + KPM • 修复 defconfig 校验
 on:
   workflow_dispatch:
 
@@ -17,26 +17,24 @@ jobs:
         run: |
           rm -rf android-kernel
           mkdir android-kernel && cd android-kernel
-          repo init -u https://android.googlesource.com/kernel/manifest -b common-android15-6.6 --depth=1
+          repo init -u https://android.googlesource.com/kernel/manifest -b common-android16-6.6 --depth=1
           repo sync -j$(nproc) -c --no-tags
 
-      # ==========================
-      # 关键：大佬同款在线打补丁
-      # ==========================
-      - name: 安装 SukiSU（完全模仿你给的脚本）
+      - name: 安装 SukiSU（大佬同款）
         run: |
           cd android-kernel/common
           curl -LSs "https://raw.githubusercontent.com/ShirkNeko/SukiSU-Ultra/main/kernel/setup.sh" | bash -s builtin
 
-      - name: 开启 KSU + KPM
+      - name: 开启 KSU + KPM 并禁用 defconfig 校验
         run: |
-          cd android-kernel/common
+          cd $GITHUB_WORKSPACE/android-kernel/common
           echo "CONFIG_KSU=y" >> arch/arm64/configs/gki_defconfig
           echo "CONFIG_KPM=y" >> arch/arm64/configs/gki_defconfig
+          sed -i 's/check_defconfig//' build.config.gki
 
       - name: 用 bz 编译
         run: |
-          cd android-kernel
+          cd $GITHUB_WORKSPACE/android-kernel
           tools/bazel build //common:kernel_aarch64
 
       - name: 打包卡刷包
