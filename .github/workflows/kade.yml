@@ -1,51 +1,89 @@
-name: GKI 6.6 A16 • SukiSU + KPM • 修复 defconfig 校验
+name: Android15-6.6 SukiSU-Ultra KPM 内核编译
+run-name: Build A15-6.6 KPM Kernel
+
 on:
   workflow_dispatch:
+    inputs:
+      kernel_branch:
+        description: '内核分支（android15-6.6）'
+        required: true
+        default: 'android15-6.6'
+      ksu_type:
+        description: 'KSU 类型（SukiSU-Ultra）'
+        required: true
+        default: 'sukisu-ultra'
+      enable_kpm:
+        description: '启用 KPM'
+        required: true
+        default: true
+      enable_susfs:
+        description: '启用 SUSFS（可选）'
+        required: true
+        default: false
 
 jobs:
-  build:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 120
-
+  build-kernel:
+    runs-on: ubuntu-22.04
     steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
       - name: 安装依赖
         run: |
           sudo apt update
-          sudo apt install -y git bc bison flex libelf-dev libssl-dev make clang lld llvm curl zip unzip python3 repo
+          sudo apt install -y git curl wget build-essential libssl-dev libncurses-dev bison flex libelf-dev bc zip unzip ccache
 
-      - name: 拉取官方内核
+      - name: 拉取 Android 15-6.6 内核源码
         run: |
-          rm -rf android-kernel
-          mkdir android-kernel && cd android-kernel
-          repo init -u https://android.googlesource.com/kernel/manifest -b common-android15-6.6 --depth=1
-          repo sync -j$(nproc) -c --no-tags
+          git clone --depth 1 --branch ${{ inputs.kernel_branch }} https://android.googlesource.com/kernel/common android-kernel
+          cd android-kernel
+          git submodule update --init --recursive --depth 1
 
-      - name: 安装 SukiSU（大佬同款）
+      - name: 安装 SukiSU-Ultra
         run: |
-          cd android-kernel/common
+          cd $GITHUB_WORKSPACE/android-kernel
           curl -LSs "https://raw.githubusercontent.com/ShirkNeko/SukiSU-Ultra/main/kernel/setup.sh" | bash -s builtin
 
-      - name: 开启 KSU + KPM 并禁用 defconfig 校验
+      - name: 修复 6.6 内核兼容性（app_profile.c）
+        run: |
+          cd $GITHUB_WORKSPACE/android-kernel/common
+          # 修复 profile->selinux_domain → profile.selinux_domain
+          sed -i 's/profile->selinux_domain/profile.selinux_domain/' drivers/kernelsu/app_profile.c
+          # 修复 newcreds 指针访问
+          sed -i 's/&newcreds.cap_effective/newcreds->cap_effective/g' drivers/kernelsu/app_profile.c
+          sed -i 's/&newcreds.cap_permitted/newcreds->cap_permitted/g' drivers/kernelsu/app_profile.c
+          sed -i 's/&newcreds.cap_bset/newcreds->cap_bset/g' drivers/kernelsu/app_profile.c
+          # 修复 cred 未定义 → current_cred()
+          sed -i 's/setup_groups(&profile, cred);/setup_groups(&profile, current_cred());/' drivers/kernelsu/app_profile.c
+
+      - name: 配置内核（开启 KSU + KPM）
         run: |
           cd $GITHUB_WORKSPACE/android-kernel/common
           echo "CONFIG_KSU=y" >> arch/arm64/configs/gki_defconfig
           echo "CONFIG_KPM=y" >> arch/arm64/configs/gki_defconfig
+          # 关闭 defconfig 校验
           sed -i 's/check_defconfig//' build.config.gki
+          # 优化编译选项
+          echo "CONFIG_LZ4=y" >> arch/arm64/configs/gki_defconfig
+          echo "CONFIG_BBR=y" >> arch/arm64/configs/gki_defconfig
 
-      - name: 用 bz 编译
+      - name: Bazel 编译内核
         run: |
           cd $GITHUB_WORKSPACE/android-kernel
-          tools/bazel build //common:kernel_aarch64
+          tools/bazel build //common:kernel_aarch64 --config=android_arm64
 
-      - name: 打包卡刷包
+      - name: 打包 AnyKernel3
         run: |
-          git clone https://github.com/osm0sis/AnyKernel3 --depth=1
-          cp android-kernel/out/android16-6.6/dist/Image AnyKernel3/
+          cd $GITHUB_WORKSPACE
+          git clone --depth 1 https://github.com/osm0sis/AnyKernel3.git
+          cp android-kernel/out/bazel-out/aarch64-fastbuild/bin/common/kernel_aarch64 AnyKernel3/Image.gz
           cd AnyKernel3
-          zip -r9 ../kernel.zip ./*
+          zip -r9 SukiSU-Ultra-A15-6.6-KPM.zip * -x .git README.md *placeholder
 
-      - name: 上传
+      - name: 上传内核包
         uses: actions/upload-artifact@v4
         with:
-          name: kernel
-          path: "*.zip"
+          name: SukiSU-Ultra-A15-6.6-KPM
+          path: AnyKernel3/SukiSU-Ultra-A15-6.6-KPM.zip
