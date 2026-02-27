@@ -1,90 +1,56 @@
-name: kade build (lyenv + kade)
+name: GKI 6.6 · Android15 · SukiSU + KPM
 
 on:
   workflow_dispatch:
-    inputs:
-      flow_config:
-        description: "Path to kadeflow.yaml"
-        required: true
-        default: "kadeflow.yaml"
 
 jobs:
   build:
-    runs-on: ubuntu-latest
-    env:
-      LYENV_HOME: ${{ github.workspace }}/.lyenv_home
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install minimal bootstrap deps
+      - name: Install dependencies
         run: |
-          set -eux
-          sudo apt-get update
-          sudo apt-get install -y make git curl python3 python3-pip
+          sudo apt update
+          sudo apt install -y git bc bison flex libelf-dev libssl-dev make clang lld llvm curl zip unzip python3
 
-      - name: Cache (LYENV_HOME caches)
-        uses: actions/cache@v4
-        with:
-          path: |
-            ${{ env.LYENV_HOME }}/cache
-            ${{ env.LYENV_HOME }}/ccache
-            ${{ env.LYENV_HOME }}/bazel-cache
-          key: kade-cache-${{ runner.os }}-${{ hashFiles('kadeflow.yaml', 'config.yaml') }}
-          restore-keys: |
-            kade-cache-${{ runner.os }}-
-
-      - name: Install lyenv
+      - name: Clone Google GKI 6.6 android15
         run: |
-          set -eux
-          mkdir -p "${LYENV_HOME}"
-          git clone https://github.com/systemnb/lyenv "${GITHUB_WORKSPACE}/_lyenv"
-          cd "${GITHUB_WORKSPACE}/_lyenv"
-          make install
+          git clone https://android.googlesource.com/kernel/common -b android15-6.6 kernel
 
-      - name: Create & activate project
+      - name: Clone SukiSU Ultra
         run: |
-          set -eux
-          # Default project name; runner will read actual from kadeflow.yaml if needed
-          PROJECT="ci-kade"
-          lyenv create "${PROJECT}"
-          cd "${PROJECT}"
-          lyenv init .
-          eval "$(lyenv activate)"
-          echo "LYENV_HOME=${LYENV_HOME}"
-          which lyenv
-          # After activate, plugin commands can be executed from anywhere
+          git clone https://github.com/SukiSU-Ultra/SukiSU-Ultra suki
 
-      - name: Run kade flow
+      - name: Apply SukiSU patch
         run: |
-          set -eux
-          python3 -m pip install --user pyyaml
-          PROJECT="ci-kade"
-          cd "${GITHUB_WORKSPACE}/${PROJECT}"
-          eval "$(lyenv activate)"
-          python3 "${GITHUB_WORKSPACE}/.github/scripts/run_kadeflow.py" \
-            --config "${GITHUB_WORKSPACE}/${{ github.event.inputs.flow_config }}" \
-            --debug \
-            --log-file "${GITHUB_WORKSPACE}/kadeflow.log"
+          cd kernel
+          bash ../suki/builtin/kernel/setup.sh builtin
 
-      - name: Upload artifacts
-        if: always()
+      - name: Enable KSU + KPM
+        run: |
+          cd kernel
+          echo "CONFIG_KSU=y" >> arch/arm64/configs/gki_defconfig
+          echo "CONFIG_KPM=y" >> arch/arm64/configs/gki_defconfig
+
+      - name: Build Kernel
+        run: |
+          cd kernel
+          export LLVM=1
+          export ARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          make gki_defconfig
+          make -j$(nproc)
+
+      - name: Pack AnyKernel3
+        run: |
+          git clone https://github.com/osm0sis/AnyKernel3 --depth=1
+          cp kernel/arch/arm64/boot/Image AnyKernel3/
+          cd AnyKernel3
+          zip -r9 ../SukiSU-GKI-6.6-Android15-KPM.zip ./*
+
+      - name: Upload zip
         uses: actions/upload-artifact@v4
         with:
-          name: kade-artifacts
-          path: |
-            # Project-local workspace
-            ${{ github.workspace }}/ci-kade/workspace/exports/**
-            ${{ github.workspace }}/ci-kade/workspace/**/compile_commands.json
-            ${{ github.workspace }}/ci-kade/workspace/img_out/**
-
-            # Caller directory outputs (if you used --out relative to repo)
-            ${{ github.workspace }}/img_out/**
-          if-no-files-found: warn
-
+          name: SukiSU-GKI-6.6-Android15-KPM
+          path: "*.zip"
