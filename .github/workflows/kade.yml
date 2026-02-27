@@ -15,12 +15,12 @@ jobs:
             git bc bison flex libelf-dev libssl-dev \
             make clang lld llvm curl zip unzip python3 python-is-python3 repo
 
-      - name: 下载 Android 内核源码（固定 android15 + 6.6）
+      - name: 下载 Android 内核源码（固定 android16 + 6.6）
         run: |
           rm -rf android-kernel
           mkdir -p android-kernel && cd android-kernel
           repo init -u https://android.googlesource.com/kernel/manifest \
-            -b common-android15-6.6 \
+            -b common-android16-6.6 \
             --depth=1
           repo sync -j$(nproc) -c --no-tags --optimized-fetch --force-sync
 
@@ -30,24 +30,24 @@ jobs:
 
       - name: 打入 SukiSU 补丁
         run: |
-          cd android-kernel/common
-          bash ../../suki/builtin/kernel/setup.sh builtin
+          cd $GITHUB_WORKSPACE/android-kernel/common
+          bash $GITHUB_WORKSPACE/suki/builtin/kernel/setup.sh builtin
 
       - name: 开启 KSU + KPM
         run: |
-          cd android-kernel/common
+          cd $GITHUB_WORKSPACE/android-kernel/common
           echo "CONFIG_KSU=y" >> arch/arm64/configs/gki_defconfig
           echo "CONFIG_KPM=y" >> arch/arm64/configs/gki_defconfig
 
       - name: 用 bz（bazel）编译内核
         run: |
-          cd android-kernel
+          cd $GITHUB_WORKSPACE/android-kernel
           tools/bazel build //common:kernel_aarch64
 
       - name: 打包 AnyKernel3
         run: |
           git clone https://github.com/osm0sis/AnyKernel3 --depth=1
-          cp android-kernel/out/android16-6.6/dist/Image AnyKernel3/
+          cp $GITHUB_WORKSPACE/android-kernel/out/android16-6.6/dist/Image AnyKernel3/
           cd AnyKernel3
           zip -r9 ../SukiSU-GKI-6.6-A16-KPM.zip ./*
 
