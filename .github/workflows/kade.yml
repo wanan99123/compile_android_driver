@@ -20,7 +20,7 @@ jobs:
           rm -rf android-kernel
           mkdir -p android-kernel && cd android-kernel
           repo init -u https://android.googlesource.com/kernel/manifest \
-            -b common-android16-6.6 \
+            -b common-android15-6.6 \
             --depth=1
           repo sync -j$(nproc) -c --no-tags --optimized-fetch --force-sync
 
