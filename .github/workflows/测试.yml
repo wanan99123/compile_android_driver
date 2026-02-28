@@ -20,7 +20,7 @@ jobs:
   build:
     runs-on: ubuntu-22.04
     steps:
-      - name: 安装完整编译依赖（含LLVM/LLD）
+      - name: 安装完整编译依赖
         run: |
           sudo apt update -qq
           sudo apt install -y build-essential flex bison libssl-dev libelf-dev bc gcc-aarch64-linux-gnu python-is-python3 repo zip curl lld llvm
@@ -34,29 +34,30 @@ jobs:
             --depth=1
           repo sync -j$(nproc) -c --no-tags --optimized-fetch --force-sync
 
-      - name: 集成 KernelSU 补丁
+      # =======================
+      # 这里是修复重点：正确集成 KSU
+      # =======================
+      - name: 集成 KernelSU（官方setup，稳定不失败）
         run: |
           cd android-kernel/common
-          git clone https://github.com/tiann/KernelSU.git KernelSU
-          git am --3way KernelSU/patches/${{ github.event.inputs.kernel_version }}/*.patch || true
+          curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s main
+          
+          # 必须：解除 GKI ABI 保护，否则 KSU 不生效
+          rm -f android/abi_gki_protected_exports_* 2>/dev/null
 
-      - name: 生成.config并动态开启 KSU + KPM（修复路径+LLVM）
+      # =======================
+      # 修复：正确开启 KSU + KPM
+      # =======================
+      - name: 开启 KSU + KPM 配置
         run: |
-          # 定义绝对路径，彻底解决路径错位问题
-          COMMON_DIR="${GITHUB_WORKSPACE}/android-kernel/common"
-          OUT_DIR="${GITHUB_WORKSPACE}/android-kernel/out/android${{ github.event.inputs.android_version }}-${{ github.event.inputs.kernel_version }}/common"
-          
-          # 先生成标准 gki_defconfig（指定LLVM工具）
-          make -C "${COMMON_DIR}" LLVM=1 DEPMOD=depmod \
-            DTC="${GITHUB_WORKSPACE}/android-kernel/build/kernel/build-tools/path/linux-x86/dtc" \
-            O="${OUT_DIR}" \
-            gki_defconfig
-          
-          # 使用绝对路径调用 scripts/config，避免相对路径错误
-          "${COMMON_DIR}/scripts/config" --file "${OUT_DIR}/.config" --enable KSU
-          "${COMMON_DIR}/scripts/config" --file "${OUT_DIR}/.config" --enable KSU_KPM
+          cd android-kernel/common
+          echo "CONFIG_KSU=y" >> arch/arm64/configs/gki_defconfig
+          echo "CONFIG_KSU_KPM=y" >> arch/arm64/configs/gki_defconfig
 
-      - name: 编译内核与驱动（原版脚本+环境加固）
+      # =======================
+      # 完全保留你原来的编译方式不动
+      # =======================
+      - name: 编译内核（原版 build.sh / bazel）
         run: |
           cd android-kernel
           export KMI_STRICT_MODE=0
@@ -73,25 +74,22 @@ jobs:
             echo "OUT_PATH=out/kernel_${ARCH}/dist" >> $GITHUB_ENV
           fi
 
-          # 定义统一的 Boot 镜像名称，方便后续上传
           echo "BOOT_IMG=boot-A${ANDROID_VER}-K${KERNEL_VER}-KSU-KPM.img" >> $GITHUB_ENV
 
-      - name: 重命名 Boot 镜像（可选，便于识别）
+      - name: 复制镜像
         run: |
           cp "android-kernel/${{ env.OUT_PATH }}/boot.img" "${{ env.BOOT_IMG }}"
           ls -lh ${{ env.BOOT_IMG }}
 
-      - name: 上传到 GitHub Releases
+      - name: 上传 Releases
         uses: softprops/action-gh-release@v2
         with:
-          # 直接上传重命名后的 boot.img
           files: ${{ env.BOOT_IMG }}
           tag_name: Build-${{ github.run_number }}
-          # 修复变量引用，使用 github.event.inputs 而非环境变量
           name: GKI ${{ github.event.inputs.kernel_version }} (Android ${{ github.event.inputs.android_version }}) + KSU + KPM
           body: |
             ✅ 编译环境：Ubuntu 22.04 + LLVM/LLD
             ✅ 功能：KernelSU 已集成 | KPM 已启用
-            📦 产物：boot.img（适用于 Fastboot 刷入）
+            📦 产物：boot.img（Fastboot 刷入）
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
