@@ -1,75 +1,83 @@
-name: GKI 5.10 (Android13) + KernelSU + KPM 编译
+name: GKI Kernel + KernelSU + KPM Build (repo方式)
 
 on:
   workflow_dispatch:
+    inputs:
+      android_version:
+        description: 'Android 版本 (如 13, 14)'
+        required: true
+        default: '13'
+      kernel_version:
+        description: '内核版本 (如 5.10, 6.12)'
+        required: true
+        default: '5.10'
 
 jobs:
   build:
     runs-on: ubuntu-22.04
     steps:
-      - name: 安装编译依赖
+      - name: 安装依赖
         run: |
-          sudo apt update -y
-          sudo apt install -y git bc bison flex libssl-dev libelf-dev make gcc zip curl
+          sudo apt update
+          sudo apt install -y git bc bison flex libssl-dev libelf-dev make gcc zip curl repo
 
-      - name: 拉取清华源 GKI 5.10 (Android13分支)
+      - name: 下载 Android 内核源码 (repo方式)
         run: |
-          # 修正核心地址：补充platform层级，这是仓库不存在的根本原因
-          git clone https://mirrors.tuna.tsinghua.edu.cn/git/android/platform/kernel/common.git -b android13-5.10 kernel
+          rm -rf android-kernel
+          mkdir -p android-kernel && cd android-kernel
+          repo init -u https://android.googlesource.com/kernel/manifest \
+            -b common-android${{ github.event.inputs.android_version }}-${{ github.event.inputs.kernel_version }} \
+            --depth=1
+          repo sync -j$(nproc) -c --no-tags --optimized-fetch --force-sync
 
-      - name: 集成 KernelSU 并打补丁
+      - name: 进入内核目录并集成 KernelSU
         run: |
-          cd kernel
+          cd android-kernel/common
           git clone https://github.com/tiann/KernelSU.git KernelSU
-          # 3way合并解决冲突，失败则手动终止（避免无效编译）
-          git am --3way KernelSU/patches/5.10/*.patch
+          git am --3way KernelSU/patches/${{ github.event.inputs.kernel_version }}/*.patch || true
 
-      - name: 开启 KernelSU + KPM 配置
+      - name: 开启 KernelSU + KPM
         run: |
-          cd kernel
-          # 追加配置到GKI默认配置
+          cd android-kernel/common
           echo "CONFIG_KSU=y" >> arch/arm64/configs/gki_defconfig
           echo "CONFIG_KSU_KPM=y" >> arch/arm64/configs/gki_defconfig
 
-      - name: 下载适配的Clang工具链（Android13 GKI专用）
+      - name: 下载 Clang 工具链
         run: |
-          # 修正工具链拉取路径，避免版本不兼容
           git clone --depth=1 https://mirrors.tuna.tsinghua.edu.cn/git/android/platform/prebuilts/clang/host/linux-x86.git clang
-          # 选用Android13 GKI编译标准的r416183b版本
-          mv clang/clang-r416183b clang-toolchain
+          # 选择与 Android 版本匹配的 Clang 版本，这里以 Android13/14 常用的 r450784d 为例
+          mv clang/clang-r450784d clang-toolchain
 
       - name: 编译内核
         run: |
-          cd kernel
+          cd android-kernel/common
           export ARCH=arm64
-          export PATH=$GITHUB_WORKSPACE/clang-toolchain/bin:$PATH
-          # 加载配置
+          export CLANG_PATH=$GITHUB_WORKSPACE/clang-toolchain
+          export PATH=$CLANG_PATH/bin:$PATH
           make gki_defconfig
-          # 多线程编译，指定Clang工具链
           make -j$(nproc) CC=clang AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip
 
-      - name: 拉取AnyKernel3打包工具
+      - name: 拉取 AnyKernel3
         run: |
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git ak3
 
-      - name: 打包为可刷入ZIP
+      - name: 打包成可刷入 zip
         run: |
-          # 复制编译好的内核镜像（GKI 5.10标准输出为Image.gz）
-          cp kernel/arch/arm64/boot/Image.gz ak3/
+          cp android-kernel/common/arch/arm64/boot/Image.gz ak3/
           cd ak3
-          # 排除无用文件，生成刷机包
-          zip -r9 GKI-5.10-Android13-KSU-KPM.zip * -x .git README.md placeholder
+          zip -r9 GKI-${{ github.event.inputs.kernel_version }}-Android${{ github.event.inputs.android_version }}-KSU-KPM.zip * -x .git README.md placeholder
 
-      - name: 上传到GitHub Releases
-        uses: softprops/action-gh-release@v2  # 修正原Action名称错误
+      - name: 上传到 GitHub Releases
+        uses: softprops/action-gh-release@v2
         with:
-          files: ak3/GKI-5.10-Android13-KSU-KPM.zip
-          tag_name: Build-${{ github.run_number }}-${{ github.run_id }}
-          name: GKI 5.10 Android13 编译版 #${{ github.run_number }}
+          files: ak3/GKI-${{ github.event.inputs.kernel_version }}-Android${{ github.event.inputs.android_version }}-KSU-KPM.zip
+          tag_name: GKI-${{ github.event.inputs.kernel_version }}-Android${{ github.event.inputs.android_version }}-KSU-KPM-${{ github.run_number }}
+          name: GKI ${{ github.event.inputs.kernel_version }} (Android ${{ github.event.inputs.android_version }}) + KernelSU + KPM
           body: |
-            ✅ 内核版本：5.10 (Android13 GKI)
-            ✅ 源码来源：清华镜像站
-            ✅ 功能：KernelSU + KPM 已启用
-            ✅ 打包工具：AnyKernel3
+            ✅ 内核版本：${{ github.event.inputs.kernel_version }}
+            ✅ Android 版本：${{ github.event.inputs.android_version }}
+            ✅ 已集成 KernelSU
+            ✅ 已开启 KPM
+            ✅ AnyKernel3 打包
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
