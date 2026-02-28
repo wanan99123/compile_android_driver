@@ -1,18 +1,18 @@
-name: GKI Kernel + KernelSU + KPM Build (repo + Bazel)
+name: GKI KernelSU + KPM 编译(repo+build.sh)
 
 on:
   workflow_dispatch:
     inputs:
       android_version:
-        description: 'Android 版本 (如 13, 14)'
+        description: 'Android 版本 (13/14)'
         required: true
         default: '13'
       kernel_version:
-        description: '内核版本 (如 5.10, 6.12)'
+        description: '内核版本 (5.10/6.12)'
         required: true
         default: '5.10'
       target_arch:
-        description: '目标架构 (如 aarch64)'
+        description: '架构 (aarch64)'
         required: true
         default: 'aarch64'
 
@@ -25,7 +25,7 @@ jobs:
           sudo apt update -qq
           sudo apt install -y build-essential flex bison libssl-dev libelf-dev bc gcc-aarch64-linux-gnu python-is-python3 repo zip curl
 
-      - name: 下载 Android 内核源码 (repo方式)
+      - name: 下载 Android 内核源码
         run: |
           rm -rf android-kernel
           mkdir -p android-kernel && cd android-kernel
@@ -34,19 +34,31 @@ jobs:
             --depth=1
           repo sync -j$(nproc) -c --no-tags --optimized-fetch --force-sync
 
-      - name: 集成 KernelSU 并打补丁
+      - name: 集成 KernelSU 补丁
         run: |
           cd android-kernel/common
           git clone https://github.com/tiann/KernelSU.git KernelSU
           git am --3way KernelSU/patches/${{ github.event.inputs.kernel_version }}/*.patch || true
 
-      - name: 开启 KernelSU + KPM 配置
+      - name: 开启 KSU + KPM
         run: |
-          cd android-kernel/common
-          echo "CONFIG_KSU=y" >> arch/arm64/configs/gki_defconfig
-          echo "CONFIG_KSU_KPM=y" >> arch/arm64/configs/gki_defconfig
+          cd android-kernel
+          ANDROID_VER=${{ github.event.inputs.android_version }}
+          KERNEL_VER=${{ github.event.inputs.kernel_version }}
+          ARCH=${{ github.event.inputs.target_arch }}
 
-      - name: 编译内核与驱动
+          # 先生成标准 gki_defconfig
+          make -C common LLVM=1 DEPMOD=depmod \
+            DTC=../build/kernel/build-tools/path/linux-x86/dtc \
+            O=../out/android${ANDROID_VER}-${KERNEL_VER}/common \
+            gki_defconfig
+
+          # 用内核自带工具动态开启 KSU，不修改原始gki_defconfig
+          cd out/android${ANDROID_VER}-${KERNEL_VER}/common
+          ../../common/scripts/config --enable KSU
+          ../../common/scripts/config --enable KSU_KPM
+
+      - name: 编译内核与驱动（你提供的原版脚本）
         run: |
           cd android-kernel
           export KMI_STRICT_MODE=0
@@ -64,29 +76,25 @@ jobs:
 
           echo "OUT_PATH=$OUT_PATH" >> $GITHUB_ENV
 
-      - name: 拉取 AnyKernel3 打包工具
+      - name: 拉取 AnyKernel3
         run: |
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git ak3
 
-      - name: 打包成可刷入 ZIP
+      - name: 打包刷机包
         run: |
-          # 复制编译好的内核镜像
-          cp android-kernel/$OUT_PATH/Image.gz ak3/
+          cp android-kernel/${OUT_PATH}/Image.gz ak3/
           cd ak3
-          zip -r9 GKI-${{ github.event.inputs.kernel_version }}-Android${{ github.event.inputs.android_version }}-KSU-KPM.zip * -x .git README.md placeholder
+          zip -r9 GKI-${{ github.event.inputs.kernel_version }}-KSU-KPM.zip * -x .git README.md placeholder
 
-      - name: 上传到 GitHub Releases
+      - name: 上传到 Releases
         uses: softprops/action-gh-release@v2
         with:
-          files: ak3/GKI-${{ github.event.inputs.kernel_version }}-Android${{ github.event.inputs.android_version }}-KSU-KPM.zip
-          tag_name: GKI-${{ github.event.inputs.kernel_version }}-Android${{ github.event.inputs.android_version }}-KSU-KPM-${{ github.run_number }}
-          name: GKI ${{ github.event.inputs.kernel_version }} (Android ${{ github.event.inputs.android_version }}) + KernelSU + KPM
+          files: ak3/GKI-${{ github.event.inputs.kernel_version }}-KSU-KPM.zip
+          tag_name: GKI-${{ github.event.inputs.kernel_version }}-KSU-KPM-${{ github.run_number }}
+          name: GKI ${{ github.event.inputs.kernel_version }} + KSU + KPM
           body: |
-            ✅ 内核版本：${{ github.event.inputs.kernel_version }}
-            ✅ Android 版本：${{ github.event.inputs.android_version }}
-            ✅ 目标架构：${{ github.event.inputs.target_arch }}
-            ✅ 已集成 KernelSU
-            ✅ 已开启 KPM
+            ✅ Android ${{ github.event.inputs.android_version }}
+            ✅ KernelSU + KPM 已开启
             ✅ AnyKernel3 打包
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
