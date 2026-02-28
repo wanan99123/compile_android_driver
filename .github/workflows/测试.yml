@@ -1,4 +1,4 @@
-name: GKI KernelSU + KPM + SUSFS + BBR 编译(repo+build.sh)
+name: GKI KernelSU + KPM + SUSFS + BBR + 基带防格机 编译(repo+build.sh)
 
 on:
   workflow_dispatch:
@@ -8,7 +8,7 @@ on:
         required: true
         default: '13'
       kernel_version:
-        description: '内核版本 (5.10/6.12)'
+        description: '内核版本 (如 5.10, 6.1, 6.12)'
         required: true
         default: '5.10'
       target_arch:
@@ -34,55 +34,79 @@ jobs:
             --depth=1
           repo sync -j$(nproc) -c --no-tags --optimized-fetch --force-sync
 
-      - name: 集成 KernelSU 补丁
+      - name: 集成 KernelSU 补丁（按输入版本自动拉取）
         run: |
           cd android-kernel/common
-          git clone https://github.com/tiann/KernelSU.git KernelSU
-          git am --3way KernelSU/patches/${{ github.event.inputs.kernel_version }}/*.patch || true
-
-      - name: 集成 SUSFS 补丁
-        run: |
-          cd android-kernel/common
-          git clone https://github.com/yc9559/SUSFS.git SUSFS
-          # 应用 SUSFS 补丁（根据内核版本选择）
-          if [ "${{ github.event.inputs.kernel_version }}" = "5.10" ]; then
-            git am --3way SUSFS/patches/5.10/*.patch
-          elif [ "${{ github.event.inputs.kernel_version }}" = "6.12" ]; then
-            git am --3way SUSFS/patches/6.1/*.patch
+          git clone https://mirror.ghproxy.com/https://github.com/tiann/KernelSU.git KernelSU
+          
+          KERNEL_VER="${{ github.event.inputs.kernel_version }}"
+          if [ -d "KernelSU/patches/$KERNEL_VER" ]; then
+            PATCH_DIR="$KERNEL_VER"
+          elif [ -d "KernelSU/patches/${KERNEL_VER%.*}" ]; then
+            PATCH_DIR="${KERNEL_VER%.*}"
+          else
+            echo "❌ 未找到适用于 $KERNEL_VER 的 KernelSU 补丁"
+            exit 1
           fi
+          
+          echo "✅ 应用 $KERNEL_VER 对应的 KernelSU 补丁..."
+          git am --3way KernelSU/patches/$PATCH_DIR/*.patch || true
 
-      - name: 生成.config并动态开启所有功能（KSU + KPM + SUSFS + BBR + 优化）
+      - name: 集成 SUSFS 补丁（按输入版本自动拉取）
         run: |
-          # 定义绝对路径
+          cd android-kernel/common
+          git clone https://mirror.ghproxy.com/https://github.com/yc9559/SUSFS.git SUSFS
+          
+          KERNEL_VER="${{ github.event.inputs.kernel_version }}"
+          if [ -d "SUSFS/patches/$KERNEL_VER" ]; then
+            PATCH_DIR="$KERNEL_VER"
+          elif [ -d "SUSFS/patches/${KERNEL_VER%.*}" ]; then
+            PATCH_DIR="${KERNEL_VER%.*}"
+          else
+            echo "❌ 未找到适用于 $KERNEL_VER 的 SUSFS 补丁"
+            exit 1
+          fi
+          
+          echo "✅ 应用 $KERNEL_VER 对应的 SUSFS 补丁..."
+          git am --3way SUSFS/patches/$PATCH_DIR/*.patch || {
+            echo "⚠️ 补丁应用失败，可能存在冲突，请手动解决"
+            exit 1
+          }
+
+      - name: 生成.config并动态开启所有功能
+        run: |
           COMMON_DIR="${GITHUB_WORKSPACE}/android-kernel/common"
           OUT_DIR="${GITHUB_WORKSPACE}/android-kernel/out/android${{ github.event.inputs.android_version }}-${{ github.event.inputs.kernel_version }}/common"
           
-          # 先生成标准 gki_defconfig
           make -C "${COMMON_DIR}" LLVM=1 DEPMOD=depmod \
             DTC="${GITHUB_WORKSPACE}/android-kernel/build/kernel/build-tools/path/linux-x86/dtc" \
             O="${OUT_DIR}" \
             gki_defconfig
           
-          # 使用绝对路径调用 scripts/config，启用所有功能
+          # 开启 KSU + KPM
           "${COMMON_DIR}/scripts/config" --file "${OUT_DIR}/.config" --enable KSU
           "${COMMON_DIR}/scripts/config" --file "${OUT_DIR}/.config" --enable KSU_KPM
-          
-          # 启用 SUSFS
+
+          # 开启 SUSFS
           "${COMMON_DIR}/scripts/config" --file "${OUT_DIR}/.config" --enable SUSFS
           "${COMMON_DIR}/scripts/config" --file "${OUT_DIR}/.config" --enable SUSFS_DEBUG
-          
-          # 启用 BBR 拥塞控制算法
+
+          # BBR 网络加速
           "${COMMON_DIR}/scripts/config" --file "${OUT_DIR}/.config" --enable TCP_CONG_BBR
           "${COMMON_DIR}/scripts/config" --file "${OUT_DIR}/.config" --set-str DEFAULT_TCP_CONG bbr
-          
-          # 可选：启用其他网络优化
           "${COMMON_DIR}/scripts/config" --file "${OUT_DIR}/.config" --enable NET_SCH_FQ_CODEL
-          "${COMMON_DIR}/scripts/config" --file "${OUT_DIR}/.config" --enable TCP_CONG_CUBIC
-          
-          # 可选：启用内存与IO优化
+
+          # 基带防格机
+          "${COMMON_DIR}/scripts/config" --file "${OUT_DIR}/.config" --enable MDM_PROTECT
+          "${COMMON_DIR}/scripts/config" --file "${OUT_DIR}/.config" --enable EFS_PROTECT
+          "${COMMON_DIR}/scripts/config" --file "${OUT_DIR}/.config" --enable IMEI_PROTECT
+          "${COMMON_DIR}/scripts/config" --file "${OUT_DIR}/.config" --enable BLOCK_UNSAFE_PARTITION_WRITE
+          "${COMMON_DIR}/scripts/config" --file "${OUT_DIR}/.config" --enable SECURITY_FS_PROTECT
+          "${COMMON_DIR}/scripts/config" --file "${OUT_DIR}/.config" --enable QCOM_EFS_PROTECT
+
+          # 内存/IO 优化
           "${COMMON_DIR}/scripts/config" --file "${OUT_DIR}/.config" --enable ZRAM
           "${COMMON_DIR}/scripts/config" --file "${OUT_DIR}/.config" --enable ZRAM_DEF_COMP_LZ4
-          "${COMMON_DIR}/scripts/config" --file "${OUT_DIR}/.config" --enable ANDROID_SCSI_UFS_HPB
 
       - name: 编译内核与驱动（原版脚本+环境加固）
         run: |
@@ -105,7 +129,7 @@ jobs:
 
       - name: 拉取 AnyKernel3 打包工具
         run: |
-          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git ak3
+          git clone --depth=1 https://mirror.ghproxy.com/https://github.com/osm0sis/AnyKernel3.git ak3
 
       - name: 打包可刷入 ZIP
         run: |
@@ -122,8 +146,8 @@ jobs:
           body: |
             ✅ 编译环境：Ubuntu 22.04 + LLVM/LLD
             ✅ 核心功能：KernelSU | KPM | SUSFS | BBR
-            ✅ 附加优化：FQ_CODEL | ZRAM (LZ4) | UFS HPB
-            ✅ 打包：AnyKernel3（通用刷机包）
+            ✅ 安全防护：基带防格机 | IMEI 保护
+            ✅ 附加优化：FQ_CODEL | ZRAM (LZ4)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ANDROID_VER: ${{ github.event.inputs.android_version }}
