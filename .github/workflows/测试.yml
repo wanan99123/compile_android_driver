@@ -29,35 +29,27 @@ jobs:
         run: |
           rm -rf android-kernel
           mkdir -p android-kernel && cd android-kernel
-          repo init -u https://android.googlesource.com/kernel/manifest \
-            -b common-android${{ github.event.inputs.android_version }}-${{ github.event.inputs.kernel_version }} \
-            --depth=1
+          repo init -u https://android.googlesource.com/kernel/manifest -b common-android${{ github.event.inputs.android_version }}-${{ github.event.inputs.kernel_version }} --depth=1
           repo sync -j$(nproc) -c --no-tags --optimized-fetch --force-sync
 
-      - name: 集成 KernelSU（官方setup，不报错）
+      - name: 集成 KernelSU
         run: |
           cd android-kernel/common
           curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s main
           rm -f android/abi_gki_protected_exports_* 2>/dev/null || true
 
-      # ==============================
-      # 关键修复：创建额外配置文件（Bazel 专用）
-      # ==============================
-      - name: 创建 kernel additional config（解决 bazel 校验错误）
+      - name: 添加额外配置文件 (解决 bazel 校验报错)
         run: |
-          mkdir -p android-kernel/common/kernel/configs
-          cat > android-kernel/common/kernel/configs/ksu.config << EOF
-  CONFIG_KSU=y
-  CONFIG_KSU_KPM=y
-  EOF
+          cd android-kernel/common
+          mkdir -p kernel/configs
+          echo "CONFIG_KSU=y" >> kernel/configs/ksu.config
+          echo "CONFIG_KSU_KPM=y" >> kernel/configs/ksu.config
 
-      - name: 编译（完全保留你原来的 build.sh + bazel）
+      - name: 编译内核 (原版逻辑不变)
         run: |
           cd android-kernel
           export KMI_STRICT_MODE=0
           export PATH="/usr/bin/llvm-config:/usr/bin:$PATH"
-
-          # 让 Bazel 识别额外 config（核心！）
           export GKI_KERNEL_ADDITIONAL_CONFIG=kernel/configs/ksu.config
 
           ANDROID_VER=${{ github.event.inputs.android_version }}
