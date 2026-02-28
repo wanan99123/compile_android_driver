@@ -36,16 +36,15 @@ jobs:
         run: |
           cd android-kernel/common
           curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s main
-          rm -f android/abi_gki_protected_exports_* 2>/dev/null || true
 
-      - name: 添加额外配置文件 (解决 bazel 校验报错)
+      - name: 添加额外配置 (Bazel 安全方式)
         run: |
           cd android-kernel/common
           mkdir -p kernel/configs
           echo "CONFIG_KSU=y" >> kernel/configs/ksu.config
           echo "CONFIG_KSU_KPM=y" >> kernel/configs/ksu.config
 
-      - name: 编译内核 (原版逻辑不变)
+      - name: 编译内核
         run: |
           cd android-kernel
           export KMI_STRICT_MODE=0
@@ -69,7 +68,7 @@ jobs:
       - name: 复制镜像
         run: |
           cp "android-kernel/${{ env.OUT_PATH }}/boot.img" "${{ env.BOOT_IMG }}"
-          ls -lh ${{ env.BOOT_IMG }}
+          ls -lh "${{ env.BOOT_IMG }}"
 
       - name: 上传 Releases
         uses: softprops/action-gh-release@v2
@@ -80,6 +79,5 @@ jobs:
           body: |
             ✅ 编译环境：Ubuntu 22.04 + LLVM/LLD
             ✅ 功能：KernelSU 已集成 | KPM 已启用
-            ✅ 编译方式：build.sh / bazel 原版不变
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
