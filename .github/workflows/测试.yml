@@ -1,0 +1,68 @@
+name: GKI 5.10 KernelSU + KPM Build
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Install Dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y git bc bison flex libssl-dev libelf-dev make gcc zip curl
+
+      - name: Clone GKI 5.10 (Tsinghua Mirror)
+        run: |
+          git clone https://mirrors.tuna.tsinghua.edu.cn/git/kernel/android/kernel/common.git -b android13-5.10 kernel
+          cd kernel
+
+      - name: Integrate KernelSU
+        run: |
+          cd kernel
+          git clone https://github.com/tiann/KernelSU.git KernelSU
+          git am --3way KernelSU/patches/5.10/*.patch || true
+
+      - name: Enable KernelSU + KPM
+        run: |
+          cd kernel
+          echo "CONFIG_KSU=y" >> arch/arm64/configs/gki_defconfig
+          echo "CONFIG_KSU_KPM=y" >> arch/arm64/configs/gki_defconfig
+
+      - name: Download Clang Toolchain
+        run: |
+          git clone https://mirrors.tuna.tsinghua.edu.cn/git/android/platform/prebuilts/clang/host/linux-x86.git clang
+          mv clang/clang-r450784d clang-toolchain
+
+      - name: Compile Kernel
+        run: |
+          cd kernel
+          export ARCH=arm64
+          export CLANG_PATH=$GITHUB_WORKSPACE/clang-toolchain
+          export PATH=$CLANG_PATH/bin:$PATH
+          make gki_defconfig
+          make -j$(nproc) CC=clang AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip
+
+      - name: Clone AnyKernel3
+        run: |
+          git clone https://github.com/osm0sis/AnyKernel3.git ak3
+
+      - name: Pack with AK3
+        run: |
+          cp kernel/arch/arm64/boot/Image.gz ak3/
+          cd ak3
+          zip -r9 GKI-5.10-KSU-KPM.zip * -x .git README.md placeholder
+
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: ak3/GKI-5.10-KSU-KPM.zip
+          tag_name: GKI-5.10-KSU-KPM-${{ github.run_number }}
+          name: GKI 5.10 KernelSU + KPM
+          body: |
+            ✅ Built from Tsinghua mirror
+            ✅ KernelSU enabled
+            ✅ KPM enabled
+            ✅ AK3 Flashable
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
