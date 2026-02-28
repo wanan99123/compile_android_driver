@@ -20,10 +20,10 @@ jobs:
   build:
     runs-on: ubuntu-22.04
     steps:
-      - name: 安装编译依赖（补充lld）
+      - name: 安装完整编译依赖（含LLVM/LLD）
         run: |
           sudo apt update -qq
-          sudo apt install -y build-essential flex bison libssl-dev libelf-dev bc gcc-aarch64-linux-gnu python-is-python3 repo zip curl lld
+          sudo apt install -y build-essential flex bison libssl-dev libelf-dev bc gcc-aarch64-linux-gnu python-is-python3 repo zip curl lld llvm
 
       - name: 下载 Android 内核源码
         run: |
@@ -40,35 +40,33 @@ jobs:
           git clone https://github.com/tiann/KernelSU.git KernelSU
           git am --3way KernelSU/patches/${{ github.event.inputs.kernel_version }}/*.patch || true
 
-      - name: 编译前生成 .config 并开启 KSU + KPM（方案一 推荐）
+      - name: 生成.config并动态开启 KSU + KPM（修复路径+LLVM）
         run: |
-          cd android-kernel
-          ANDROID_VER=${{ github.event.inputs.android_version }}
-          KERNEL_VER=${{ github.event.inputs.kernel_version }}
-          ARCH=${{ github.event.inputs.target_arch }}
-
-          # 先生成标准 gki_defconfig，确保 lld 在 PATH 中
-          export PATH="/usr/bin:$PATH"
-          make -C common LLVM=1 DEPMOD=depmod \
-            DTC=../build/kernel/build-tools/path/linux-x86/dtc \
-            O=../out/android${ANDROID_VER}-${KERNEL_VER}/common \
+          # 定义绝对路径，彻底解决路径错位问题
+          COMMON_DIR="${GITHUB_WORKSPACE}/android-kernel/common"
+          OUT_DIR="${GITHUB_WORKSPACE}/android-kernel/out/android${{ github.event.inputs.android_version }}-${{ github.event.inputs.kernel_version }}/common"
+          
+          # 先生成标准 gki_defconfig（指定LLVM工具）
+          make -C "${COMMON_DIR}" LLVM=1 DEPMOD=depmod \
+            DTC="${GITHUB_WORKSPACE}/android-kernel/build/kernel/build-tools/path/linux-x86/dtc" \
+            O="${OUT_DIR}" \
             gki_defconfig
+          
+          # 使用绝对路径调用 scripts/config，避免相对路径错误
+          "${COMMON_DIR}/scripts/config" --file "${OUT_DIR}/.config" --enable KSU
+          "${COMMON_DIR}/scripts/config" --file "${OUT_DIR}/.config" --enable KSU_KPM
 
-          # 用内核自带工具动态开启 KSU，不修改原始gki_defconfig
-          cd out/android${ANDROID_VER}-${KERNEL_VER}/common
-          ../../common/scripts/config --enable KSU
-          ../../common/scripts/config --enable KSU_KPM
-
-      - name: 编译内核与驱动（你提供的原版脚本）
+      - name: 编译内核与驱动（原版脚本+环境加固）
         run: |
           cd android-kernel
           export KMI_STRICT_MODE=0
+          export PATH="/usr/bin/llvm-config:/usr/bin:$PATH"
           ANDROID_VER=${{ github.event.inputs.android_version }}
           ARCH=${{ github.event.inputs.target_arch }}
           KERNEL_VER=${{ github.event.inputs.kernel_version }}
 
           if [ "$ANDROID_VER" -le 13 ]; then
-            BUILD_CONFIG=common/build.config.gki.${ARCH} LTO=thin build/build.sh -j32
+            BUILD_CONFIG=common/build.config.gki.${ARCH} LTO=thin build/build.sh -j$(nproc)
             OUT_PATH="out/android${ANDROID_VER}-${KERNEL_VER}/dist"
           else
             tools/bazel run //common:kernel_${ARCH}_dist
@@ -77,25 +75,27 @@ jobs:
 
           echo "OUT_PATH=$OUT_PATH" >> $GITHUB_ENV
 
-      - name: 拉取 AnyKernel3
+      - name: 拉取 AnyKernel3 打包工具
         run: |
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git ak3
 
-      - name: 打包刷机包
+      - name: 打包可刷入 ZIP
         run: |
-          cp android-kernel/${OUT_PATH}/Image.gz ak3/
+          cp "android-kernel/${{ env.OUT_PATH }}/Image.gz" ak3/
           cd ak3
-          zip -r9 GKI-${{ github.event.inputs.kernel_version }}-KSU-KPM.zip * -x .git README.md placeholder
+          zip -r9 "GKI-Android${{ github.event.inputs.android_version }}-Kernel${{ github.event.inputs.kernel_version }}-KSU-KPM.zip" * -x .git README.md placeholder
 
-      - name: 上传到 Releases
+      - name: 上传到 GitHub Releases
         uses: softprops/action-gh-release@v2
         with:
-          files: ak3/GKI-${{ github.event.inputs.kernel_version }}-KSU-KPM.zip
-          tag_name: GKI-${{ github.event.inputs.kernel_version }}-KSU-KPM-${{ github.run_number }}
-          name: GKI ${{ github.event.inputs.kernel_version }} + KSU + KPM
+          files: "ak3/GKI-Android${{ github.event.inputs.android_version }}-Kernel${{ github.event.inputs.kernel_version }}-KSU-KPM.zip"
+          tag_name: Build-${{ github.run_number }}
+          name: GKI ${KERNEL_VER} (Android ${ANDROID_VER}) + KSU + KPM
           body: |
-            ✅ Android ${{ github.event.inputs.android_version }}
-            ✅ KernelSU + KPM 已开启
-            ✅ AnyKernel3 打包
+            ✅ 编译环境：Ubuntu 22.04 + LLVM/LLD
+            ✅ 功能：KernelSU 已集成 | KPM 已启用
+            ✅ 打包：AnyKernel3（通用刷机包）
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ANDROID_VER: ${{ github.event.inputs.android_version }}
+          KERNEL_VER: ${{ github.event.inputs.kernel_version }}
