@@ -20,10 +20,10 @@ jobs:
   build:
     runs-on: ubuntu-22.04
     steps:
-      - name: 安装编译依赖
+      - name: 安装编译依赖（补充lld）
         run: |
           sudo apt update -qq
-          sudo apt install -y build-essential flex bison libssl-dev libelf-dev bc gcc-aarch64-linux-gnu python-is-python3 repo zip curl
+          sudo apt install -y build-essential flex bison libssl-dev libelf-dev bc gcc-aarch64-linux-gnu python-is-python3 repo zip curl lld
 
       - name: 下载 Android 内核源码
         run: |
@@ -40,14 +40,15 @@ jobs:
           git clone https://github.com/tiann/KernelSU.git KernelSU
           git am --3way KernelSU/patches/${{ github.event.inputs.kernel_version }}/*.patch || true
 
-      - name: 开启 KSU + KPM
+      - name: 编译前生成 .config 并开启 KSU + KPM（方案一 推荐）
         run: |
           cd android-kernel
           ANDROID_VER=${{ github.event.inputs.android_version }}
           KERNEL_VER=${{ github.event.inputs.kernel_version }}
           ARCH=${{ github.event.inputs.target_arch }}
 
-          # 先生成标准 gki_defconfig
+          # 先生成标准 gki_defconfig，确保 lld 在 PATH 中
+          export PATH="/usr/bin:$PATH"
           make -C common LLVM=1 DEPMOD=depmod \
             DTC=../build/kernel/build-tools/path/linux-x86/dtc \
             O=../out/android${ANDROID_VER}-${KERNEL_VER}/common \
