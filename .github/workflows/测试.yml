@@ -22,35 +22,36 @@ on:
           - 'ksunext'
           - 'ksu'
           - 'none'
+      kpm_enable:
+        description: '启用 KPM (Kernel Patch Manager)'
+        required: true
+        type: boolean
+        default: false
       susfs_enable:
-        description: '开启 SUSFS（增强隐藏）'
+        description: '启用 SUSFS 增强隐藏'
         required: true
         type: boolean
-        default: true
+        default: false
       lz4_enable:
-        description: '开启 LZ4 1.10.0 + ZSTD 1.5.7'
+        description: '启用 LZ4 1.10.0 + ZSTD 优化'
         required: true
         type: boolean
-        default: true
+        default: false
       bbr_enable:
-        description: 'BBR 拥塞控制'
+        description: '启用 BBR/Brutal 拥塞算法'
         required: true
-        type: choice
-        options:
-          - 'false'
-          - 'true'
-          - 'default'
-        default: 'false'
+        type: boolean
+        default: false
       adios_enable:
-        description: '开启 ADIOS IO 调度器'
+        description: '启用 ADIOS IO 调度器'
         required: true
         type: boolean
-        default: true
+        default: false
       baseband_protect:
-        description: '开启 基带保护（防基带丢失）'
+        description: '启用基带保护(防掉基带)'
         required: true
         type: boolean
-        default: true
+        default: false
 
 jobs:
   build:
@@ -68,101 +69,79 @@ jobs:
           repo init -u https://android.googlesource.com/kernel/manifest -b common-android-${{ github.event.inputs.android_version }}-${{ github.event.inputs.kernel_version }} --depth=1
           repo sync -j$(nproc) -c --no-tags --optimized-fetch --force-sync
 
-      - name: 集成 KernelSU（拉最新）
+      - name: 集成 KernelSU
         id: ksu_version
         run: |
           cd android-kernel/common
           rm -rf KernelSU KernelSU-Next 2>/dev/null
 
           case ${{ github.event.inputs.ksu_type }} in
-            "sukisu")
+            sukisu)
               echo "→ SukiSU Ultra"
               curl -LSs "https://raw.githubusercontent.com/ShirkNeko/SukiSU-Ultra/builtin/kernel/setup.sh" | bash -s builtin
               cd KernelSU
               git pull origin builtin
-              KSU_VERSION=$(expr $(git rev-list --count builtin) + 37185 || echo 37185)
+              KSU_VERSION=$(expr $(git rev-list --count builtin) + 37185 2>/dev/null || echo 37185)
               echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
               echo "ksuver=$KSU_VERSION" >> $GITHUB_OUTPUT
               ;;
-            "resukisu")
+            resukisu)
               echo "→ ReSukiSU"
               curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash -s main
               cd KernelSU
               git pull origin main
-              KSU_VERSION=$(expr $(git rev-list --count main) + 30700 || echo 30700)
+              KSU_VERSION=$(expr $(git rev-list --count main) + 30700 2>/dev/null || echo 30700)
               echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
               echo "ksuver=$KSU_VERSION" >> $GITHUB_OUTPUT
               ;;
-            "ksunext")
+            ksunext)
               echo "→ KernelSU Next"
               curl -LSs "https://raw.githubusercontent.com/pershoot/KernelSU-Next/dev-susfs/kernel/setup.sh" | bash -s dev-susfs
               cd KernelSU-Next
               git pull origin dev-susfs
-              KSU_VERSION=$(expr $(git rev-list --count dev-susfs) + 30000 || echo 30000)
+              KSU_VERSION=$(expr $(git rev-list --count dev-susfs) + 30000 2>/dev/null || echo 30000)
               echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
               echo "ksuver=$KSU_VERSION" >> $GITHUB_OUTPUT
               ;;
-            "ksu")
+            ksu)
               echo "→ 原版 KernelSU"
               curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s main
               cd KernelSU
               git pull origin main
-              KSU_VERSION=$(expr $(git rev-list --count main) + 30000 || echo 30000)
+              KSU_VERSION=$(expr $(git rev-list --count main) + 30000 2>/dev/null || echo 30000)
               sed -i "s/DKSU_VERSION=16/DKSU_VERSION=$KSU_VERSION/" kernel/Kbuild
               echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
               echo "ksuver=$KSU_VERSION" >> $GITHUB_OUTPUT
               ;;
-            "none")
+            none)
               echo "→ 不使用 KernelSU"
               ;;
           esac
 
-      - name: 应用 基带保护
-        if: inputs.baseband_protect
-        run: |
-          cd android-kernel/common
-          echo "✅ 开启基带保护"
-          cat >> kernel/configs/baseband.config << EOF
-CONFIG_MSM_CORE_HIDS_BASEBAND=y
-CONFIG_QCOM_SMP2P_TEST=y
-CONFIG_QCOM_SMP2P_SMSM=y
-CONFIG_QCOM_MHI_BBTEST=y
-CONFIG_QCOM_SMEM=y
-CONFIG_QCOM_Q6VOTE=y
-CONFIG_QCOM_SPSS=y
-CONFIG_QCOM_QMI_CLOCK=y
-CONFIG_QCOM_QMI_HELPERS=y
-CONFIG_QCOM_RMTFS_MEM=y
-CONFIG_QCOM_RPMPD=y
-EOF
-
-      - name: 生成额外配置（Bazel 安全）
+      - name: 生成额外配置（全开关）
         run: |
           cd android-kernel/common
           mkdir -p kernel/configs
-          rm -f kernel/configs/extra.config
-          touch kernel/configs/extra.config
+          > kernel/configs/extra.config
 
           if [[ "${{ github.event.inputs.ksu_type }}" != "none" ]]; then
             echo "CONFIG_KSU=y" >> kernel/configs/extra.config
-            echo "CONFIG_KSU_KPM=y" >> kernel/configs/extra.config
+            if [[ "${{ github.event.inputs.kpm_enable }}" == "true" ]]; then
+              echo "CONFIG_KSU_KPM=y" >> kernel/configs/extra.config
+            fi
             if [[ "${{ github.event.inputs.susfs_enable }}" == "true" ]]; then
               echo "CONFIG_KSU_SUSFS=y" >> kernel/configs/extra.config
             fi
           fi
 
-          if [[ "${{ github.event.inputs.bbr_enable }}" != "false" ]]; then
+          if [[ "${{ github.event.inputs.bbr_enable }}" == "true" ]]; then
             echo "CONFIG_TCP_CONG_ADVANCED=y" >> kernel/configs/extra.config
             echo "CONFIG_TCP_CONG_BBR=y" >> kernel/configs/extra.config
             echo "CONFIG_TCP_CONG_BRUTAL=y" >> kernel/configs/extra.config
-            if [[ "${{ github.event.inputs.bbr_enable }}" == "default" ]]; then
-              echo "CONFIG_DEFAULT_TCP_CONG=\"bbr\"" >> kernel/configs/extra.config
-            fi
           fi
 
           if [[ "${{ github.event.inputs.adios_enable }}" == "true" ]]; then
             echo "CONFIG_MQ_IOSCHED_ADIOS=y" >> kernel/configs/extra.config
-            echo "CONFIG_DEFAULT_MQ_IOSCHED=\"adios\"" >> kernel/configs/extra.config
           fi
 
           if [[ "${{ github.event.inputs.lz4_enable }}" == "true" ]]; then
@@ -172,7 +151,9 @@ EOF
           fi
 
           if [[ "${{ github.event.inputs.baseband_protect }}" == "true" ]]; then
-            cat kernel/configs/baseband.config >> kernel/configs/extra.config
+            echo "CONFIG_MSM_CORE_HIDS_BASEBAND=y" >> kernel/configs/extra.config
+            echo "CONFIG_QCOM_SMEM=y" >> kernel/configs/extra.config
+            echo "CONFIG_QCOM_RMTFS_MEM=y" >> kernel/configs/extra.config
           fi
 
       - name: 编译内核
@@ -202,20 +183,19 @@ EOF
             *) KSU_NAME="NoKSU" ;;
           esac
 
-          [ "${{ github.event.inputs.baseband_protect }}" = "true" ] && BPF="-BBPROT"
-          IMG_NAME="boot-A$ANDROID_VER-K$KERNEL_VER-$KSU_NAME$BPF.img"
-          echo "BOOT_IMG=$IMG_NAME" >> $GITHUB_ENV
+          BOOT_IMG="boot-A$ANDROID_VER-K$KERNEL_VER-$KSU_NAME.img"
+          echo "BOOT_IMG=$BOOT_IMG" >> $GITHUB_ENV
 
-      - name: 打包镜像
+      - name: 复制镜像
         run: |
           cp android-kernel/${{ env.OUT_PATH }}/boot.img ${{ env.BOOT_IMG }}
           ls -lh ${{ env.BOOT_IMG }}
 
       - name: 上传 Releases
-        uses: softprops/gh-release@v2
+        uses: softprops/action-gh-release@v2
         with:
           files: ${{ env.BOOT_IMG }}
           tag_name: build-${{ github.run_number }}
-          name: GKI ${{ github.event.inputs.kernel_version }} | ${{ github.event.inputs.ksu_type }} + 基带保护
+          name: GKI ${{ github.event.inputs.kernel_version }} | ${{ github.event.inputs.ksu_type }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
