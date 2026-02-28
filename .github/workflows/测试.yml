@@ -1,4 +1,4 @@
-name: GKI KernelSU + KPM 编译(repo+build.sh)
+name: GKI KernelSU + KPM + SUSFS + BBR 编译(repo+build.sh)
 
 on:
   workflow_dispatch:
@@ -40,21 +40,49 @@ jobs:
           git clone https://github.com/tiann/KernelSU.git KernelSU
           git am --3way KernelSU/patches/${{ github.event.inputs.kernel_version }}/*.patch || true
 
-      - name: 生成.config并动态开启 KSU + KPM（修复路径+LLVM）
+      - name: 集成 SUSFS 补丁
         run: |
-          # 定义绝对路径，彻底解决路径错位问题
+          cd android-kernel/common
+          git clone https://github.com/yc9559/SUSFS.git SUSFS
+          # 应用 SUSFS 补丁（根据内核版本选择）
+          if [ "${{ github.event.inputs.kernel_version }}" = "5.10" ]; then
+            git am --3way SUSFS/patches/5.10/*.patch
+          elif [ "${{ github.event.inputs.kernel_version }}" = "6.12" ]; then
+            git am --3way SUSFS/patches/6.1/*.patch
+          fi
+
+      - name: 生成.config并动态开启所有功能（KSU + KPM + SUSFS + BBR + 优化）
+        run: |
+          # 定义绝对路径
           COMMON_DIR="${GITHUB_WORKSPACE}/android-kernel/common"
           OUT_DIR="${GITHUB_WORKSPACE}/android-kernel/out/android${{ github.event.inputs.android_version }}-${{ github.event.inputs.kernel_version }}/common"
           
-          # 先生成标准 gki_defconfig（指定LLVM工具）
+          # 先生成标准 gki_defconfig
           make -C "${COMMON_DIR}" LLVM=1 DEPMOD=depmod \
             DTC="${GITHUB_WORKSPACE}/android-kernel/build/kernel/build-tools/path/linux-x86/dtc" \
             O="${OUT_DIR}" \
             gki_defconfig
           
-          # 使用绝对路径调用 scripts/config，避免相对路径错误
+          # 使用绝对路径调用 scripts/config，启用所有功能
           "${COMMON_DIR}/scripts/config" --file "${OUT_DIR}/.config" --enable KSU
           "${COMMON_DIR}/scripts/config" --file "${OUT_DIR}/.config" --enable KSU_KPM
+          
+          # 启用 SUSFS
+          "${COMMON_DIR}/scripts/config" --file "${OUT_DIR}/.config" --enable SUSFS
+          "${COMMON_DIR}/scripts/config" --file "${OUT_DIR}/.config" --enable SUSFS_DEBUG
+          
+          # 启用 BBR 拥塞控制算法
+          "${COMMON_DIR}/scripts/config" --file "${OUT_DIR}/.config" --enable TCP_CONG_BBR
+          "${COMMON_DIR}/scripts/config" --file "${OUT_DIR}/.config" --set-str DEFAULT_TCP_CONG bbr
+          
+          # 可选：启用其他网络优化
+          "${COMMON_DIR}/scripts/config" --file "${OUT_DIR}/.config" --enable NET_SCH_FQ_CODEL
+          "${COMMON_DIR}/scripts/config" --file "${OUT_DIR}/.config" --enable TCP_CONG_CUBIC
+          
+          # 可选：启用内存与IO优化
+          "${COMMON_DIR}/scripts/config" --file "${OUT_DIR}/.config" --enable ZRAM
+          "${COMMON_DIR}/scripts/config" --file "${OUT_DIR}/.config" --enable ZRAM_DEF_COMP_LZ4
+          "${COMMON_DIR}/scripts/config" --file "${OUT_DIR}/.config" --enable ANDROID_SCSI_UFS_HPB
 
       - name: 编译内核与驱动（原版脚本+环境加固）
         run: |
@@ -83,17 +111,18 @@ jobs:
         run: |
           cp "android-kernel/${{ env.OUT_PATH }}/Image.gz" ak3/
           cd ak3
-          zip -r9 "GKI-Android${{ github.event.inputs.android_version }}-Kernel${{ github.event.inputs.kernel_version }}-KSU-KPM.zip" * -x .git README.md placeholder
+          zip -r9 "GKI-Android${{ github.event.inputs.android_version }}-Kernel${{ github.event.inputs.kernel_version }}-KSU-KPM-SUSFS-BBR.zip" * -x .git README.md placeholder
 
       - name: 上传到 GitHub Releases
         uses: softprops/action-gh-release@v2
         with:
-          files: "ak3/GKI-Android${{ github.event.inputs.android_version }}-Kernel${{ github.event.inputs.kernel_version }}-KSU-KPM.zip"
+          files: "ak3/GKI-Android${{ github.event.inputs.android_version }}-Kernel${{ github.event.inputs.kernel_version }}-KSU-KPM-SUSFS-BBR.zip"
           tag_name: Build-${{ github.run_number }}
-          name: GKI ${KERNEL_VER} (Android ${ANDROID_VER}) + KSU + KPM
+          name: GKI ${KERNEL_VER} (Android ${ANDROID_VER}) + KSU + KPM + SUSFS + BBR
           body: |
             ✅ 编译环境：Ubuntu 22.04 + LLVM/LLD
-            ✅ 功能：KernelSU 已集成 | KPM 已启用
+            ✅ 核心功能：KernelSU | KPM | SUSFS | BBR
+            ✅ 附加优化：FQ_CODEL | ZRAM (LZ4) | UFS HPB
             ✅ 打包：AnyKernel3（通用刷机包）
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
