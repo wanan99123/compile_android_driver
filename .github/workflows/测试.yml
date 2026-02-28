@@ -6,52 +6,15 @@ on:
       android_version:
         description: 'Android 版本 (13/14/15)'
         required: true
-        default: '15'
+        default: '14'
       kernel_version:
         description: '内核版本 (5.10/6.1/6.6)'
         required: true
         default: '6.6'
-      ksu_type:
-        description: 'KernelSU 分支'
+      target_arch:
+        description: '架构 (aarch64)'
         required: true
-        default: 'resukisu'
-        type: choice
-        options:
-          - 'sukisu'
-          - 'resukisu'
-          - 'ksunext'
-          - 'ksu'
-          - 'none'
-      kpm_enable:
-        description: '启用 KPM'
-        required: true
-        type: boolean
-        default: false
-      susfs_enable:
-        description: '启用 SUSFS'
-        required: true
-        type: boolean
-        default: false
-      lz4_enable:
-        description: '启用 LZ4 1.10.0 + ZSTD'
-        required: true
-        type: boolean
-        default: false
-      bbr_enable:
-        description: '启用 BBR/Brutal'
-        required: true
-        type: boolean
-        default: false
-      adios_enable:
-        description: '启用 ADIOS IO'
-        required: true
-        type: boolean
-        default: false
-      baseband_protect:
-        description: '启用基带保护'
-        required: true
-        type: boolean
-        default: false
+        default: 'aarch64'
 
 jobs:
   build:
@@ -60,152 +23,66 @@ jobs:
       - name: 安装依赖
         run: |
           sudo apt update -qq
-          sudo apt install -y build-essential flex bison libssl-dev libelf-dev bc gcc-aarch64-linux-gnu python-is-python3 repo zip curl lld llvm git
+          sudo apt install -y build-essential flex bison libssl-dev libelf-dev bc gcc-aarch64-linux-gnu python-is-python3 repo zip curl lld llvm
 
       - name: 下载 Android 内核源码
         run: |
           rm -rf android-kernel
           mkdir -p android-kernel && cd android-kernel
-          repo init -u https://android.googsource.com/kernel/manifest -b common-android-${{ github.event.inputs.android_version }}-${{ github.event.inputs.kernel_version }} --depth=1
+          repo init -u https://android.googlesource.com/kernel/manifest -b common-android${{ github.event.inputs.android_version }}-${{ github.event.inputs.kernel_version }} --depth=1
           repo sync -j$(nproc) -c --no-tags --optimized-fetch --force-sync
 
-      - name: 集成 KernelSU
-        id: ksu_version
+      - name: 集成 KernelSU（拉取最新 main 分支）
         run: |
           cd android-kernel/common
-          rm -rf KernelSU KernelSU-Next 2>/dev/null
-
-          case ${{ github.event.inputs.ksu_type }} in
-            sukisu)
-              echo "→ SukiSU Ultra"
-              curl -LSs "https://raw.githubusercontent.com/ShirkNeko/SukiSU-Ultra/builtin/kernel/setup.sh" | bash -s builtin
-              cd KernelSU
-              git pull origin builtin
-              KSU_VERSION=$(expr $(git rev-list --count builtin) + 37185 2>/dev/null || echo 37185)
-              echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
-              echo "ksuver=$KSU_VERSION" >> $GITHUB_OUTPUT
-              ;;
-            resukisu)
-              echo "→ ReSukiSU"
-              curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash -s main
-              cd KernelSU
-              git pull origin main
-              KSU_VERSION=$(expr $(git rev-list --count main) + 30700 2>/dev/null || echo 30700)
-              echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
-              echo "ksuver=$KSU_VERSION" >> $GITHUB_OUTPUT
-              ;;
-            ksunext)
-              echo "→ KernelSU Next"
-              curl -LSs "https://raw.githubusercontent.com/pershoot/KernelSU-Next/dev-susfs/kernel/setup.sh" | bash -s dev-susfs
-              cd KernelSU-Next
-              git pull origin dev-susfs
-              KSU_VERSION=$(expr $(git rev-list --count dev-susfs) + 30000 2>/dev/null || echo 30000)
-              echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
-              echo "ksuver=$KSU_VERSION" >> $GITHUB_OUTPUT
-              ;;
-            ksu)
-              echo "→ 原版 KernelSU"
-              curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s main
-              cd KernelSU
-              git pull origin main
-              KSU_VERSION=$(expr $(git rev-list --count main) + 30000 2>/dev/null || echo 30000)
-              sed -i "s/DKSU_VERSION=16/DKSU_VERSION=$KSU_VERSION/" kernel/Kbuild
-              echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
-              echo "ksuver=$KSU_VERSION" >> $GITHUB_OUTPUT
-              ;;
-            none)
-              echo "→ 不使用 KernelSU"
-              ;;
-          esac
-
-      - name: 应用官方 SUSFS 补丁
-        if: ${{ inputs.susfs_enable == true && inputs.ksu_type != 'none' }}
-        run: |
-          cd android-kernel
-          git clone --depth=1 https://github.com/tiann/SUSFS.git SUSFS
-          cd SUSFS
-          bash install.sh ..
+          # 执行官方 setup.sh 初始化
+          curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s main
+          # 核心修改：进入 KernelSU 目录，强制拉取最新代码
+          cd ./KernelSU
+          git pull origin main
           cd ..
-          rm -rf SUSFS
 
-      - name: 生成额外配置
+      - name: 添加额外配置 (Bazel 安全方式)
         run: |
           cd android-kernel/common
           mkdir -p kernel/configs
-          > kernel/configs/extra.config
-
-          if [[ "${{ github.event.inputs.ksu_type }}" != "none" ]]; then
-            echo "CONFIG_KSU=y" >> kernel/configs/extra.config
-            if [[ "${{ github.event.inputs.kpm_enable }}" == "true" ]]; then
-              echo "CONFIG_KSU_KPM=y" >> kernel/configs/extra.config
-            fi
-            if [[ "${{ github.event.inputs.susfs_enable }}" == "true" ]]; then
-              echo "CONFIG_KSU_SUSFS=y" >> kernel/configs/extra.config
-            fi
-          fi
-
-          if [[ "${{ github.event.inputs.bbr_enable }}" == "true" ]]; then
-            echo "CONFIG_TCP_CONG_ADVANCED=y" >> kernel/configs/extra.config
-            echo "CONFIG_TCP_CONG_BBR=y" >> kernel/configs/extra.config
-            echo "CONFIG_TCP_CONG_BRUTAL=y" >> kernel/configs/extra.config
-          fi
-
-          if [[ "${{ github.event.inputs.adios_enable }}" == "true" ]]; then
-            echo "CONFIG_MQ_IOSCHED_ADIOS=y" >> kernel/configs/extra.config
-          fi
-
-          if [[ "${{ github.event.inputs.lz4_enable }}" == "true" ]]; then
-            echo "CONFIG_CRYPTO_LZ4=y" >> kernel/configs/extra.config
-            echo "CONFIG_CRYPTO_LZ4HC=y" >> kernel/configs/extra.config
-            echo "CONFIG_ZSTD_COMPRESS=y" >> kernel/configs/extra.config
-          fi
-
-          if [[ "${{ github.event.inputs.baseband_protect }}" == "true" ]]; then
-            echo "CONFIG_MSM_CORE_HIDS_BASEBAND=y" >> kernel/configs/extra.config
-            echo "CONFIG_QCOM_SMEM=y" >> kernel/configs/extra.config
-            echo "CONFIG_QCOM_RMTFS_MEM=y" >> kernel/configs/extra.config
-          fi
+          echo "CONFIG_KSU=y" >> kernel/configs/ksu.config
+          echo "CONFIG_KSU_KPM=y" >> kernel/configs/ksu.config
 
       - name: 编译内核
         run: |
           cd android-kernel
           export KMI_STRICT_MODE=0
-          export GKI_KERNEL_ADDITIONAL_CONFIG=kernel/configs/extra.config
-          ARCH=aarch64
+          export PATH="/usr/bin/llvm-config:/usr/bin:$PATH"
+          export GKI_KERNEL_ADDITIONAL_CONFIG=kernel/configs/ksu.config
+
           ANDROID_VER=${{ github.event.inputs.android_version }}
+          ARCH=${{ github.event.inputs.target_arch }}
           KERNEL_VER=${{ github.event.inputs.kernel_version }}
 
           if [ "$ANDROID_VER" -le 13 ]; then
-            BUILD_CONFIG=common/build.config.gki.aarch64 LTO=thin build/build.sh -j$(nproc)
-            OUT_PATH=out/android-$ANDROID_VER-$KERNEL_VER/dist
+            BUILD_CONFIG=common/build.config.gki.${ARCH} LTO=thin build/build.sh -j$(nproc)
+            echo "OUT_PATH=out/android${ANDROID_VER}-${KERNEL_VER}/dist" >> $GITHUB_ENV
           else
-            tools/bazel run //common:kernel_aarch64_dist
-            OUT_PATH=out/kernel_aarch64/dist
+            tools/bazel run //common:kernel_${ARCH}_dist
+            echo "OUT_PATH=out/kernel_${ARCH}/dist" >> $GITHUB_ENV
           fi
 
-          echo "OUT_PATH=$OUT_PATH" >> $GITHUB_ENV
-
-          case ${{ github.event.inputs.ksu_type }} in
-            sukisu) KSU_NAME="SukiSU-Ultra" ;;
-            resukisu) KSU_NAME="ReSukiSU" ;;
-            ksunext) KSU_NAME="KernelSU-Next" ;;
-            ksu) KSU_NAME="KernelSU" ;;
-            *) KSU_NAME="NoKSU" ;;
-          esac
-
-          BOOT_IMG="boot-A$ANDROID_VER-K$KERNEL_VER-$KSU_NAME.img"
-          echo "BOOT_IMG=$BOOT_IMG" >> $GITHUB_ENV
+          echo "BOOT_IMG=boot-A${ANDROID_VER}-K${KERNEL_VER}-KSU-KPM.img" >> $GITHUB_ENV
 
       - name: 复制镜像
         run: |
-          cp android-kernel/${{ env.OUT_PATH }}/boot.img ${{ env.BOOT_IMG }}
-          ls -lh ${{ env.BOOT_IMG }}
+          cp "android-kernel/${{ env.OUT_PATH }}/boot.img" "${{ env.BOOT_IMG }}"
+          ls -lh "${{ env.BOOT_IMG }}"
 
       - name: 上传 Releases
         uses: softprops/action-gh-release@v2
         with:
           files: ${{ env.BOOT_IMG }}
-          tag_name: build-${{ github.run_number }}
-          name: GKI ${{ github.event.inputs.kernel_version }} | ${{ github.event.inputs.ksu_type }}
+          tag_name: Build-${{ github.run_number }}
+          name: GKI ${{ github.event.inputs.kernel_version }} (Android ${{ github.event.inputs.android_version }}) + KSU + KPM
+          body: |
+            ✅ 编译环境：Ubuntu 22.04 + LLVM/LLD
+            ✅ 功能：KernelSU 最新版 | KPM 已启用
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
