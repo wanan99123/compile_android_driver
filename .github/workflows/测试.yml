@@ -1,4 +1,4 @@
-name: GKI KernelSU + KPM + SUSFS + BBR + 基带防格机 编译(repo+build.sh)
+name: GKI KernelSU + KPM 编译(repo+build.sh)
 
 on:
   workflow_dispatch:
@@ -8,7 +8,7 @@ on:
         required: true
         default: '13'
       kernel_version:
-        description: '内核版本 (如 5.10, 6.1, 6.12)'
+        description: '内核版本 (5.10/6.12)'
         required: true
         default: '5.10'
       target_arch:
@@ -34,79 +34,27 @@ jobs:
             --depth=1
           repo sync -j$(nproc) -c --no-tags --optimized-fetch --force-sync
 
-      - name: 集成 KernelSU 补丁（按输入版本自动拉取）
+      - name: 集成 KernelSU 补丁
         run: |
           cd android-kernel/common
-          git clone https://mirror.ghproxy.com/https://github.com/tiann/KernelSU.git KernelSU
-          
-          KERNEL_VER="${{ github.event.inputs.kernel_version }}"
-          if [ -d "KernelSU/patches/$KERNEL_VER" ]; then
-            PATCH_DIR="$KERNEL_VER"
-          elif [ -d "KernelSU/patches/${KERNEL_VER%.*}" ]; then
-            PATCH_DIR="${KERNEL_VER%.*}"
-          else
-            echo "❌ 未找到适用于 $KERNEL_VER 的 KernelSU 补丁"
-            exit 1
-          fi
-          
-          echo "✅ 应用 $KERNEL_VER 对应的 KernelSU 补丁..."
-          git am --3way KernelSU/patches/$PATCH_DIR/*.patch || true
+          git clone https://github.com/tiann/KernelSU.git KernelSU
+          git am --3way KernelSU/patches/${{ github.event.inputs.kernel_version }}/*.patch || true
 
-      - name: 集成 SUSFS 补丁（按输入版本自动拉取）
+      - name: 生成.config并动态开启 KSU + KPM（修复路径+LLVM）
         run: |
-          cd android-kernel/common
-          git clone https://mirror.ghproxy.com/https://github.com/yc9559/SUSFS.git SUSFS
-          
-          KERNEL_VER="${{ github.event.inputs.kernel_version }}"
-          if [ -d "SUSFS/patches/$KERNEL_VER" ]; then
-            PATCH_DIR="$KERNEL_VER"
-          elif [ -d "SUSFS/patches/${KERNEL_VER%.*}" ]; then
-            PATCH_DIR="${KERNEL_VER%.*}"
-          else
-            echo "❌ 未找到适用于 $KERNEL_VER 的 SUSFS 补丁"
-            exit 1
-          fi
-          
-          echo "✅ 应用 $KERNEL_VER 对应的 SUSFS 补丁..."
-          git am --3way SUSFS/patches/$PATCH_DIR/*.patch || {
-            echo "⚠️ 补丁应用失败，可能存在冲突，请手动解决"
-            exit 1
-          }
-
-      - name: 生成.config并动态开启所有功能
-        run: |
+          # 定义绝对路径，彻底解决路径错位问题
           COMMON_DIR="${GITHUB_WORKSPACE}/android-kernel/common"
           OUT_DIR="${GITHUB_WORKSPACE}/android-kernel/out/android${{ github.event.inputs.android_version }}-${{ github.event.inputs.kernel_version }}/common"
           
+          # 先生成标准 gki_defconfig（指定LLVM工具）
           make -C "${COMMON_DIR}" LLVM=1 DEPMOD=depmod \
             DTC="${GITHUB_WORKSPACE}/android-kernel/build/kernel/build-tools/path/linux-x86/dtc" \
             O="${OUT_DIR}" \
             gki_defconfig
           
-          # 开启 KSU + KPM
+          # 使用绝对路径调用 scripts/config，避免相对路径错误
           "${COMMON_DIR}/scripts/config" --file "${OUT_DIR}/.config" --enable KSU
           "${COMMON_DIR}/scripts/config" --file "${OUT_DIR}/.config" --enable KSU_KPM
-
-          # 开启 SUSFS
-          "${COMMON_DIR}/scripts/config" --file "${OUT_DIR}/.config" --enable SUSFS
-          "${COMMON_DIR}/scripts/config" --file "${OUT_DIR}/.config" --enable SUSFS_DEBUG
-
-          # BBR 网络加速
-          "${COMMON_DIR}/scripts/config" --file "${OUT_DIR}/.config" --enable TCP_CONG_BBR
-          "${COMMON_DIR}/scripts/config" --file "${OUT_DIR}/.config" --set-str DEFAULT_TCP_CONG bbr
-          "${COMMON_DIR}/scripts/config" --file "${OUT_DIR}/.config" --enable NET_SCH_FQ_CODEL
-
-          # 基带防格机
-          "${COMMON_DIR}/scripts/config" --file "${OUT_DIR}/.config" --enable MDM_PROTECT
-          "${COMMON_DIR}/scripts/config" --file "${OUT_DIR}/.config" --enable EFS_PROTECT
-          "${COMMON_DIR}/scripts/config" --file "${OUT_DIR}/.config" --enable IMEI_PROTECT
-          "${COMMON_DIR}/scripts/config" --file "${OUT_DIR}/.config" --enable BLOCK_UNSAFE_PARTITION_WRITE
-          "${COMMON_DIR}/scripts/config" --file "${OUT_DIR}/.config" --enable SECURITY_FS_PROTECT
-          "${COMMON_DIR}/scripts/config" --file "${OUT_DIR}/.config" --enable QCOM_EFS_PROTECT
-
-          # 内存/IO 优化
-          "${COMMON_DIR}/scripts/config" --file "${OUT_DIR}/.config" --enable ZRAM
-          "${COMMON_DIR}/scripts/config" --file "${OUT_DIR}/.config" --enable ZRAM_DEF_COMP_LZ4
 
       - name: 编译内核与驱动（原版脚本+环境加固）
         run: |
@@ -129,25 +77,24 @@ jobs:
 
       - name: 拉取 AnyKernel3 打包工具
         run: |
-          git clone --depth=1 https://mirror.ghproxy.com/https://github.com/osm0sis/AnyKernel3.git ak3
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git ak3
 
       - name: 打包可刷入 ZIP
         run: |
           cp "android-kernel/${{ env.OUT_PATH }}/Image.gz" ak3/
           cd ak3
-          zip -r9 "GKI-Android${{ github.event.inputs.android_version }}-Kernel${{ github.event.inputs.kernel_version }}-KSU-KPM-SUSFS-BBR.zip" * -x .git README.md placeholder
+          zip -r9 "GKI-Android${{ github.event.inputs.android_version }}-Kernel${{ github.event.inputs.kernel_version }}-KSU-KPM.zip" * -x .git README.md placeholder
 
       - name: 上传到 GitHub Releases
         uses: softprops/action-gh-release@v2
         with:
-          files: "ak3/GKI-Android${{ github.event.inputs.android_version }}-Kernel${{ github.event.inputs.kernel_version }}-KSU-KPM-SUSFS-BBR.zip"
+          files: "ak3/GKI-Android${{ github.event.inputs.android_version }}-Kernel${{ github.event.inputs.kernel_version }}-KSU-KPM.zip"
           tag_name: Build-${{ github.run_number }}
-          name: GKI ${KERNEL_VER} (Android ${ANDROID_VER}) + KSU + KPM + SUSFS + BBR
+          name: GKI ${KERNEL_VER} (Android ${ANDROID_VER}) + KSU + KPM
           body: |
             ✅ 编译环境：Ubuntu 22.04 + LLVM/LLD
-            ✅ 核心功能：KernelSU | KPM | SUSFS | BBR
-            ✅ 安全防护：基带防格机 | IMEI 保护
-            ✅ 附加优化：FQ_CODEL | ZRAM (LZ4)
+            ✅ 功能：KernelSU 已集成 | KPM 已启用
+            ✅ 打包：AnyKernel3（通用刷机包）
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ANDROID_VER: ${{ github.event.inputs.android_version }}
