@@ -1,266 +1,242 @@
-#include "TearGame_Driver.h"
+/*
+ * 内核级物理内存读取模块
+ * 通过Netlink与用户态通信
+ */
 
-/* ============================
-   内存操作函数实现
-   ============================ */
+// ==================== 宏与结构体定义 ====================
+#define NETLINK_CUSTOM_PROTOCOL 20
+#define ARC_PATH_MAX 256
+#define GS_MAX_MODULE_NAME_LEN 256
 
-bool read_process_memory(pid_t pid, uintptr_t addr, void *buffer, size_t size)
+struct process_info {
+    pid_t pid;
+    size_t virt_addr;
+    size_t len;
+    void *base;
+    int type;
+    char *module_name;
+};
+
+// ==================== 头文件包含 ====================
+#include <linux/init.h>
+#include <linux/module.h>
+#include <linux/kernel.h>
+#include <linux/fs.h>
+#include <linux/slab.h>
+#include <linux/mm.h>
+#include <linux/sched/mm.h>
+#include <linux/vmalloc.h>
+#include <linux/string.h>
+#include <linux/list.h>
+#include <linux/kobject.h>
+#include <linux/file.h>
+#include <linux/fdtable.h>
+#include <linux/fs_struct.h>
+#include <linux/mount.h>
+#include <linux/ptrace.h>
+#include <linux/seq_file.h>
+#include <linux/cdev.h>
+#include <linux/device.h>
+#include <linux/kallsyms.h>
+#include <linux/kprobes.h>
+#include <linux/highmem.h>
+#include <linux/errno.h>
+#include <linux/version.h>
+#include <linux/types.h>
+#include <linux/mmzone.h>
+#include <linux/netlink.h>
+#include <linux/skbuff.h>
+#include <net/sock.h>
+
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("Jayne");
+MODULE_DESCRIPTION("一个通过Netlink调用内核模块实现内核级物理内存读取的简单示例");
+MODULE_VERSION("0.1");
+
+// ==================== 全局变量 ====================
+struct sock *nl_sk = NULL;
+struct netlink_kernel_cfg cfg;
+struct process_info *process_info_data;
+
+// ==================== 辅助函数 ====================
+
+/**
+ * @brief 根据PID获取进程的mm_struct
+ */
+static inline struct mm_struct *get_mm_by_pid(pid_t nr)
 {
-    struct task_struct *task;
-    struct pid *pid_struct;
-    int bytes_read;
-    void *kbuf;
-
-    if (size == 0 || size > MAX_OPERATION_SIZE)
-        return false;
-
-    pid_struct = find_get_pid(pid);
-    if (!pid_struct)
-        return false;
-
-    task = get_pid_task(pid_struct, PIDTYPE_PID);
-    put_pid(pid_struct);
+    struct task_struct *task = pid_task(find_vpid(nr), PIDTYPE_PID);
     if (!task)
-        return false;
-
-    kbuf = kmalloc(size, GFP_KERNEL);
-    if (!kbuf) {
-        put_task_struct(task);
-        return false;
-    }
-
-    bytes_read = access_process_vm(task, addr, kbuf, size, FOLL_FORCE);
-    put_task_struct(task);
-
-    if (bytes_read != size) {
-        kfree(kbuf);
-        return false;
-    }
-
-    if (copy_to_user(buffer, kbuf, size)) {
-        kfree(kbuf);
-        return false;
-    }
-
-    kfree(kbuf);
-    return true;
+        return NULL;
+    return get_task_mm(task);
 }
 
-bool write_process_memory(pid_t pid, uintptr_t addr, void *buffer, size_t size)
+/**
+ * @brief 获取指定模块在进程中的基地址
+ */
+uintptr_t get_module_base(struct mm_struct *mm, char *name)
 {
-    struct task_struct *task;
-    struct pid *pid_struct;
-    int bytes_written;
-    void *kbuf;
-
-    if (size == 0 || size > MAX_OPERATION_SIZE)
-        return false;
-
-    pid_struct = find_get_pid(pid);
-    if (!pid_struct)
-        return false;
-
-    task = get_pid_task(pid_struct, PIDTYPE_PID);
-    put_pid(pid_struct);
-    if (!task)
-        return false;
-
-    kbuf = kmalloc(size, GFP_KERNEL);
-    if (!kbuf) {
-        put_task_struct(task);
-        return false;
-    }
-
-    if (copy_from_user(kbuf, buffer, size)) {
-        kfree(kbuf);
-        put_task_struct(task);
-        return false;
-    }
-
-    bytes_written = access_process_vm(task, addr, kbuf, size, FOLL_FORCE | FOLL_WRITE);
-    put_task_struct(task);
-    kfree(kbuf);
-
-    return (bytes_written == size);
-}
-
-/* ============================
-   进程信息函数实现
-   ============================ */
-
-uintptr_t get_module_base(pid_t pid, char *name)
-{
-    struct pid *pid_struct;
-    struct task_struct *task;
-    struct mm_struct *mm;
     struct vm_area_struct *vma;
-    uintptr_t base_addr = 0;
-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0))
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
     struct vma_iterator vmi;
-#endif
-
-    pid_struct = find_get_pid(pid);
-    if (!pid_struct)
-        return 0;
-
-    task = get_pid_task(pid_struct, PIDTYPE_PID);
-    put_pid(pid_struct);
-    if (!task)
-        return 0;
-
-    mm = get_task_mm(task);
-    put_task_struct(task);
-    if (!mm)
-        return 0;
-
-    mmap_read_lock(mm);
-
-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0))
     vma_iter_init(&vmi, mm, 0);
-    for_each_vma(vmi, vma)
+    for_each_vma(vmi, vma) {
 #else
-    for (vma = mm->mmap; vma; vma = vma->vm_next)
+    for (vma = mm->mmap; vma; vma = vma->vm_next) {
 #endif
-    {
-        if (vma->vm_file) {
-            char buf[ARC_PATH_MAX];
-            char *path_nm;
+        char buf[ARC_PATH_MAX];
+        char *path_nm = "";
 
-            path_nm = d_path(&vma->vm_file->f_path, buf, ARC_PATH_MAX - 1);
-            if (!IS_ERR(path_nm)) {
-                const char *basename = kbasename(path_nm);
-                if (strcmp(basename, name) == 0) {
-                    base_addr = vma->vm_start;
-                    break;
-                }
+        if (vma->vm_file) {
+            path_nm = file_path(vma->vm_file, buf, ARC_PATH_MAX - 1);
+            if (!strcmp(kbasename(path_nm), name)) {
+                return vma->vm_start;
             }
         }
     }
-
-    mmap_read_unlock(mm);
-    mmput(mm);
-    return base_addr;
-}
-
-/* ============================
-   设备驱动函数实现
-   ============================ */
-
-int dispatch_open(struct inode *node, struct file *file)
-{
     return 0;
 }
 
-int dispatch_close(struct inode *node, struct file *file)
+/**
+ * @brief 线性地址转物理地址
+ */
+phys_addr_t translate_linear_address(struct mm_struct *mm, uintptr_t va)
 {
-    return 0;
+    pgd_t *pgd;
+    p4d_t *p4d;
+    pud_t *pud;
+    pmd_t *pmd;
+    pte_t *pte;
+
+    pgd = pgd_offset(mm, va);
+    if (pgd_none(*pgd) || pgd_bad(*pgd))
+        return 0;
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 8, 0)
+    p4d = p4d_offset(pgd, va);
+    if (p4d_none(*p4d) || p4d_bad(*p4d))
+        return 0;
+    pud = pud_offset(p4d, va);
+#else
+    pud = pud_offset(pgd, va);
+#endif
+
+    if (pud_none(*pud) || pud_bad(*pud))
+        return 0;
+
+    pmd = pmd_offset(pud, va);
+    if (pmd_none(*pmd))
+        return 0;
+
+    pte = pte_offset_kernel(pmd, va);
+    if (pte_none(*pte) || !pte_present(*pte))
+        return 0;
+
+    // 计算物理地址
+    phys_addr_t page_addr = (phys_addr_t)(pte_pfn(*pte) << PAGE_SHIFT);
+    uintptr_t page_offset = va & (PAGE_SIZE - 1);
+    return page_addr + page_offset;
 }
 
-long dispatch_ioctl(struct file *const file, unsigned int const cmd, unsigned long const arg)
+/**
+ * @brief 从物理地址读取数据
+ */
+void read_phys_addr(void *base, phys_addr_t phys_addr, void *kernel_addr, size_t len)
 {
-    static COPY_MEMORY cm;
-    static MODULE_BASE mb;
-    static char key[0x100] = {0};
-    static char name[0x100] = {0};
-    static bool is_verified = false;
+    if (!phys_addr || !pfn_valid(__phys_to_pfn(phys_addr)))
+        return;
 
-    if (cmd == OP_INIT_KEY && !is_verified)
-    {
-        if (copy_from_user(key, (void __user *)arg, sizeof(key) - 1) != 0)
-        {
-            return -1;
-        }
-    }
-    
-    switch (cmd)
-    {
-    case OP_READ_MEM:
-    {
-        if (copy_from_user(&cm, (void __user *)arg, sizeof(cm)) != 0)
-        {
-            return -1;
-        }
-        if (read_process_memory(cm.pid, cm.addr, cm.buffer, cm.size) == false)
-        {
-            return -1;
-        }
-        break;
-    }
-    case OP_WRITE_MEM:
-    {
-        if (copy_from_user(&cm, (void __user *)arg, sizeof(cm)) != 0)
-        {
-            return -1;
-        }
-        if (write_process_memory(cm.pid, cm.addr, cm.buffer, cm.size) == false)
-        {
-            return -1;
-        }
-        break;
-    }
-    case OP_MODULE_BASE:
-    {
-        if (copy_from_user(&mb, (void __user *)arg, sizeof(mb)) != 0 || 
-            copy_from_user(name, (void __user *)mb.name, sizeof(name) - 1) != 0)
-        {
-            return -1;
-        }
-        mb.base = get_module_base(mb.pid, name);
-        if (copy_to_user((void __user *)arg, &mb, sizeof(mb)) != 0)
-        {
-            return -1;
-        }
-        break;
-    }
-    default:
-        break;
-    }
-    return 0;
+    kernel_addr = ioremap_cache(phys_addr, len);
+    if (!kernel_addr)
+        return;
+
+    copy_to_user(base, kernel_addr, len);
+    iounmap(kernel_addr);
 }
 
-/* 设备操作结构体 */
-struct file_operations dispatch_functions = {
-    .owner = THIS_MODULE,
-    .open = dispatch_open,
-    .release = dispatch_close,
-    .unlocked_ioctl = dispatch_ioctl,
-};
-
-/* 杂项设备结构体 */
-struct miscdevice misc = {
-    .minor = MISC_DYNAMIC_MINOR,
-    .name = DEVICE_NAME,
-    .fops = &dispatch_functions,
-};
-
-/* 驱动入口函数 */
-int __init driver_entry(void)
+/**
+ * @brief 向物理地址写入数据
+ */
+void write_phys_addr(void *base, phys_addr_t phys_addr, void *kernel_addr, size_t len)
 {
-    int ret;
+    if (!phys_addr || !pfn_valid(__phys_to_pfn(phys_addr)))
+        return;
 
-    ret = misc_register(&misc);
-    if (ret == 0) {
-        printk(KERN_INFO "[TearGame] Device registered: /dev/%s\n", DEVICE_NAME);
-        printk(KERN_INFO "[TearGame] Driver loaded successfully!\n");
+    kernel_addr = ioremap_cache(phys_addr, len);
+    if (!kernel_addr)
+        return;
+
+    copy_from_user(kernel_addr, base, len);
+    iounmap(kernel_addr);
+}
+
+// ==================== Netlink 回调 ====================
+
+/**
+ * @brief Netlink消息处理
+ */
+static void nl_recv_msg(struct sk_buff *skb)
+{
+    struct nlmsghdr *nlh = (struct nlmsghdr *)skb->data;
+    process_info_data = (struct process_info *)nlmsg_data(nlh);
+
+    int pid = process_info_data->pid;
+    int type = process_info_data->type;
+    size_t len = process_info_data->len;
+    void *base = process_info_data->base;
+
+    struct mm_struct *mm = get_mm_by_pid(pid);
+    if (!mm) return;
+
+    if (type == 2) {
+        // 获取模块基地址
+        char kernel_module_name[GS_MAX_MODULE_NAME_LEN];
+        if (copy_from_user(kernel_module_name, process_info_data->module_name, sizeof(kernel_module_name))) {
+            mmput(mm);
+            return;
+        }
+
+        uintptr_t ptr = get_module_base(mm, kernel_module_name);
+        copy_to_user(base, &ptr, len);
     } else {
-        printk(KERN_ERR "[TearGame] Failed to register device! ret=%d\n", ret);
+        // 内存读写
+        size_t virt_addr = process_info_data->virt_addr;
+        phys_addr_t phys_addr = translate_linear_address(mm, virt_addr);
+
+        if (type == 0)
+            read_phys_addr(base, phys_addr, NULL, len);
+        else if (type == 1)
+            write_phys_addr(base, phys_addr, NULL, len);
     }
-    return ret;
+
+    mmput(mm);
 }
 
-/* 驱动卸载函数 */
-void __exit driver_unload(void)
+// ==================== 模块入口 ====================
+
+static int __init netlink_virt_to_phys_init(void)
 {
-    
-    misc_deregister(&misc);
-    
+    // 配置Netlink
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.input = nl_recv_msg;
+    nl_sk = netlink_kernel_create(&init_net, NETLINK_CUSTOM_PROTOCOL, &cfg);
+    if (!nl_sk) return -ENOMEM;
+
+    // 隐藏模块（Rootkit特性）
+    struct module *mod = THIS_MODULE;
+    list_del_init(&mod->list);
+    kobject_del(&mod->mkobj.kobj);
+    mod->sect_attrs = NULL;
+    mod->notes_attrs = NULL;
+
+    return 0;
 }
 
-/* 模块初始化和退出声明 */
-module_init(driver_entry);
-module_exit(driver_unload);
+static void __exit netlink_virt_to_phys_exit(void)
+{
+    if (nl_sk) netlink_kernel_release(nl_sk);
+}
 
-/* 模块信息 */
-MODULE_DESCRIPTION("TearGame Memory Driver - t.me/TearGame");
-MODULE_LICENSE("GPL");
-MODULE_AUTHOR("泪心 QQ:2254013571");
+module_init(netlink_virt_to_phys_init);
+module_exit(netlink_virt_to_phys_exit);
