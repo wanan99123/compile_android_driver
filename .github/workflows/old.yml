@@ -43,33 +43,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # ========== 从你原内核提取的 CCACHE 缓存配置 ==========
-      - name: 配置 ccache 环境
-        run: |
-          echo "CCACHE_DIR=$HOME/.ccache_${{ github.event.inputs.kernel_version }}" >> $GITHUB_ENV
-          echo "CCACHE_MAXSIZE=3G" >> $GITHUB_ENV
-          echo "CCACHE_COMPILERCHECK=none" >> $GITHUB_ENV
-          echo "CCACHE_NOHASHDIR=true" >> $GITHUB_ENV
-          echo "CCACHE_HARDLINK=true" >> $GITHUB_ENV
-
-      - name: 载入 ccache 缓存
-        uses: actions/cache@v4
-        id: ccache-restore
-        with:
-          path: ${{ env.CCACHE_DIR }}
-          key: ccache-driver-${{ github.event.inputs.kernel_version }}-${{ runner.os }}
-          restore-keys: |
-            ccache-driver-${{ github.event.inputs.kernel_version }}-
-            ccache-driver-
-
-      - name: 初始化 ccache
-        run: |
-          mkdir -p "${CCACHE_DIR}"
-          ccache -M "${CCACHE_MAXSIZE}"
-          ccache -o compression=true
-          ccache -s
-      # ====================================================
-
       - name: 准备驱动源码
         run: |
           mkdir -p kerneldriver
@@ -132,11 +105,38 @@ jobs:
           sudo apt update -qq
           sudo apt install -y build-essential flex bison libssl-dev libelf-dev bc gcc-aarch64-linux-gnu python-is-python3 ccache
 
+      # ========== CCACHE 缓存加速配置 ==========
+      - name: 配置 ccache 环境变量
+        run: |
+          echo "CCACHE_DIR=$HOME/.ccache_${{ github.event.inputs.kernel_version }}" >> $GITHUB_ENV
+          echo "CCACHE_MAXSIZE=3G" >> $GITHUB_ENV
+          echo "CCACHE_COMPILERCHECK=none" >> $GITHUB_ENV
+          echo "CCACHE_NOHASHDIR=true" >> $GITHUB_ENV
+          echo "CCACHE_HARDLINK=true" >> $GITHUB_ENV
+
+      - name: 载入 ccache 缓存
+        uses: actions/cache@v4
+        id: ccache-restore
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-driver-${{ github.event.inputs.kernel_version }}-${{ runner.os }}
+          restore-keys: |
+            ccache-driver-${{ github.event.inputs.kernel_version }}-
+            ccache-driver-
+
+      - name: 初始化 ccache
+        run: |
+          mkdir -p "${CCACHE_DIR}"
+          ccache -M "${CCACHE_MAXSIZE}"
+          ccache -o compression=true
+          ccache -s
+
       - name: 启用 ccache 包装编译
         run: |
           export PATH="/usr/lib/ccache:$PATH"
-          echo "使用 ccache 加速编译"
+          echo "=== 编译前 ccache 状态 ==="
           ccache -s
+      # ======================================
 
       - name: 编译内核与驱动
         run: |
@@ -157,11 +157,11 @@ jobs:
 
           echo "OUT_PATH=$OUT_PATH" >> $GITHUB_ENV
 
-      - name: 编译后显示缓存状态
+      - name: 编译后查看 ccache 状态
         run: |
+          echo "=== 编译后 ccache 状态 ==="
           ccache -s
 
-      # 保存新缓存
       - name: 保存 ccache 缓存
         if: always()
         uses: actions/cache/save@v4
