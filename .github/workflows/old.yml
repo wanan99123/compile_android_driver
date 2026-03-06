@@ -1,4 +1,4 @@
-name: Android 内核驱动编译(make)
+name: Android 内核驱动编译
 on:
   workflow_dispatch:
     inputs:
@@ -47,7 +47,7 @@ jobs:
           mkdir -p kerneldriver
           cp ./code/* kerneldriver/ 2>/dev/null || true
 
-      - name: 下载 Android 内核源码 (repo 方式)
+      - name: 下载 Android 内核源码
         run: |
           sudo apt install -y repo
           rm -rf android-kernel
@@ -72,50 +72,77 @@ jobs:
           sed -i '/kerneldriver/d' $MF
           echo "obj-m += kerneldriver/" >> $MF
 
+      - name: 注册模块到 GKI
+        run: |
+          cd android-kernel
+          ARCH=${{ github.event.inputs.target_arch }}
+          ANDROID_VER=${{ github.event.inputs.android_version }}
+          MOD="drivers/kerneldriver/${{ github.event.inputs.driver_name }}"
+
+          if [ "$ANDROID_VER" -le 13 ]; then
+            MOD_FILE="common/android/gki_${ARCH}_modules"
+            sed -i '/kerneldriver/d' "$MOD_FILE"
+            echo "$MOD" >> "$MOD_FILE"
+          else
+            BZL_FILE="common/modules.bzl"
+            awk -i inplace -v m="$MOD" '
+            BEGIN { added=0 }
+            /_COMMON_GKI_MODULES_LIST = \[/ { in_list=1 }
+            in_list && /\]/ {
+              if (!added) {
+                print "    \"" m "\","
+                added=1
+              }
+              in_list=0
+            }
+            { print }
+            ' "$BZL_FILE"
+          fi
+
       - name: 安装编译依赖
         run: |
           sudo apt update -qq
           sudo apt install -y build-essential flex bison libssl-dev libelf-dev bc gcc-aarch64-linux-gnu python-is-python3
 
-      - name: 原生 make 编译驱动模块（不编译完整内核）
+      - name: 编译内核与驱动
         run: |
           cd android-kernel
-          # 关键修复：ARCH 用 arm64，CROSS_COMPILE 用 aarch64-linux-gnu-
-          ARCH=arm64
-          CROSS_COMPILE=aarch64-linux-gnu-
-          JOBS=$(nproc)
+          export KMI_STRICT_MODE=0
+          ANDROID_VER=${{ github.event.inputs.android_version }}
+          ARCH=${{ github.event.inputs.target_arch }}
+          KERNEL_VER=${{ github.event.inputs.kernel_version }}
 
-          # 进入 common 子目录（repo 下载的源码通常在这里）
-          if [ -d common ]; then
-            cd common
+          if [ "$ANDROID_VER" -le 13 ]; then
+            BUILD_CONFIG=common/build.config.gki.${ARCH} LTO=thin build/build.sh -j32
+            OUT_PATH="out/android${ANDROID_VER}-${KERNEL_VER}/dist"
+          else
+            tools/bazel run //common:kernel_${ARCH}_dist
+            OUT_PATH="out/kernel_${ARCH}/dist"
           fi
 
-          # 1. 生成默认配置
-          make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE gki_defconfig
-
-          # 2. 只准备模块编译环境（关键优化）
-          make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE modules_prepare
-
-          # 3. 只编译驱动目录下的模块
-          make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE M=drivers/kerneldriver -j$JOBS modules
-
-          # 4. 验证编译结果
-          echo "=== 编译完成的驱动模块 ==="
-          find drivers/kerneldriver -name "*.ko" -type f | xargs ls -lh
+          echo "OUT_PATH=$OUT_PATH" >> $GITHUB_ENV
 
       - name: 提取驱动 .ko
         id: extract_ko
         run: |
           KO_NAME="${{ github.event.inputs.driver_name }}"
-          KO_PATH=$(find android-kernel -name "$KO_NAME" -type f | head -1)
+          BASE_DIR="android-kernel"
+          DIST_PATH="${BASE_DIR}/${{ env.OUT_PATH }}/${KO_NAME}"
+          SEARCH_PATH="${BASE_DIR}/out"
 
-          if [ -z "$KO_PATH" ]; then
-            echo "Error: $KO_NAME not found!"
-            exit 1
+          if [ -f "${DIST_PATH}" ]; then
+            cp -v "${DIST_PATH}" .
+          else
+            KO_PATH=$(find "${SEARCH_PATH}" -name "${KO_NAME}" -type f | head -1)
+            if [ -n "${KO_PATH}" ]; then
+              cp -v "${KO_PATH}" .
+            else
+              echo "Error: ${KO_NAME} not found!"
+              exit 1
+            fi
           fi
 
-          cp -v "$KO_PATH" ./
-          echo "ko_path=./$KO_NAME" >> $GITHUB_OUTPUT
+          echo "ko_path=./${KO_NAME}" >> $GITHUB_OUTPUT
 
       - uses: actions/upload-artifact@v4
         with:
