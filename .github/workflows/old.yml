@@ -1,4 +1,5 @@
 name: Android 内核驱动编译
+
 on:
   workflow_dispatch:
     inputs:
@@ -41,6 +42,33 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      # ========== 从你原内核提取的 CCACHE 缓存配置 ==========
+      - name: 配置 ccache 环境
+        run: |
+          echo "CCACHE_DIR=$HOME/.ccache_${{ github.event.inputs.kernel_version }}" >> $GITHUB_ENV
+          echo "CCACHE_MAXSIZE=3G" >> $GITHUB_ENV
+          echo "CCACHE_COMPILERCHECK=none" >> $GITHUB_ENV
+          echo "CCACHE_NOHASHDIR=true" >> $GITHUB_ENV
+          echo "CCACHE_HARDLINK=true" >> $GITHUB_ENV
+
+      - name: 载入 ccache 缓存
+        uses: actions/cache@v4
+        id: ccache-restore
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-driver-${{ github.event.inputs.kernel_version }}-${{ runner.os }}
+          restore-keys: |
+            ccache-driver-${{ github.event.inputs.kernel_version }}-
+            ccache-driver-
+
+      - name: 初始化 ccache
+        run: |
+          mkdir -p "${CCACHE_DIR}"
+          ccache -M "${CCACHE_MAXSIZE}"
+          ccache -o compression=true
+          ccache -s
+      # ====================================================
 
       - name: 准备驱动源码
         run: |
@@ -102,18 +130,25 @@ jobs:
       - name: 安装编译依赖
         run: |
           sudo apt update -qq
-          sudo apt install -y build-essential flex bison libssl-dev libelf-dev bc gcc-aarch64-linux-gnu python-is-python3
+          sudo apt install -y build-essential flex bison libssl-dev libelf-dev bc gcc-aarch64-linux-gnu python-is-python3 ccache
+
+      - name: 启用 ccache 包装编译
+        run: |
+          export PATH="/usr/lib/ccache:$PATH"
+          echo "使用 ccache 加速编译"
+          ccache -s
 
       - name: 编译内核与驱动
         run: |
           cd android-kernel
+          export PATH="/usr/lib/ccache:$PATH"
           export KMI_STRICT_MODE=0
           ANDROID_VER=${{ github.event.inputs.android_version }}
           ARCH=${{ github.event.inputs.target_arch }}
           KERNEL_VER=${{ github.event.inputs.kernel_version }}
 
           if [ "$ANDROID_VER" -le 13 ]; then
-            BUILD_CONFIG=common/build.config.gki.${ARCH} LTO=thin build/build.sh -j32
+            BUILD_CONFIG=common/build.config.gki.${ARCH} LTO=thin build/build.sh -j$(nproc)
             OUT_PATH="out/android${ANDROID_VER}-${KERNEL_VER}/dist"
           else
             tools/bazel run //common:kernel_${ARCH}_dist
@@ -121,6 +156,18 @@ jobs:
           fi
 
           echo "OUT_PATH=$OUT_PATH" >> $GITHUB_ENV
+
+      - name: 编译后显示缓存状态
+        run: |
+          ccache -s
+
+      # 保存新缓存
+      - name: 保存 ccache 缓存
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-driver-${{ github.event.inputs.kernel_version }}-${{ runner.os }}
 
       - name: 提取驱动 .ko
         id: extract_ko
