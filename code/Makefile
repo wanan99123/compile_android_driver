@@ -1,1 +1,1 @@
-obj-m += TearGame_Driver.o
+obj-m += gs_mem.o
