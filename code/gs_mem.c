@@ -11,13 +11,14 @@
 #include <linux/sched/mm.h>
 #include <linux/list.h>
 #include <linux/kobject.h>
+#include <asm/io.h>
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Jayne");
 MODULE_DESCRIPTION("High performance kernel memory r/w");
 MODULE_VERSION("1.0");
 
-static struct sock *nl_sk = NULL;
+struct sock *nl_sk;
 
 static __always_inline struct mm_struct *get_mm_by_pid(pid_t nr)
 {
@@ -92,26 +93,26 @@ translate_linear_address(struct mm_struct *mm, uintptr_t va)
 static __always_inline void
 read_phys_addr(void __user *base, phys_addr_t pa, size_t len)
 {
-    void *ka = ioremap_nocache(pa, len);
+    void __iomem *ka = ioremap_cache(pa, len);
     if (!ka)
         return;
 
-    __copy_to_user(base, ka, len);
+    (void)__copy_to_user(base, ka, len);
     iounmap(ka);
 }
 
 static __always_inline void
 write_phys_addr(void __user *base, phys_addr_t pa, size_t len)
 {
-    void *ka = ioremap_nocache(pa, len);
+    void __iomem *ka = ioremap_cache(pa, len);
     if (!ka)
         return;
 
-    __copy_from_user(ka, base, len);
+    (void)__copy_from_user(ka, base, len);
     iounmap(ka);
 }
 
-static void __hot nl_recv_msg(struct sk_buff *skb)
+static void nl_recv_msg(struct sk_buff *skb)
 {
     struct nlmsghdr *nlh = nlmsg_hdr(skb);
     struct process_info *info = nlmsg_data(nlh);
@@ -123,7 +124,7 @@ static void __hot nl_recv_msg(struct sk_buff *skb)
 
     if (info->type == 2) {
         uintptr_t base = get_module_base(mm, info->module_name);
-        __copy_to_user(info->base, &base, info->len);
+        (void)__copy_to_user(info->base, &base, info->len);
         mmput(mm);
         return;
     }
@@ -138,7 +139,7 @@ static void __hot nl_recv_msg(struct sk_buff *skb)
     mmput(mm);
 }
 
-static int __init mem_init(void)
+static int __init gs_mem_init(void)
 {
     struct netlink_kernel_cfg cfg = {
         .input = nl_recv_msg,
@@ -157,11 +158,11 @@ static int __init mem_init(void)
     return 0;
 }
 
-static void __exit mem_exit(void)
+static void __exit gs_mem_exit(void)
 {
     if (nl_sk)
         netlink_kernel_release(nl_sk);
 }
 
-module_init(mem_init);
-module_exit(mem_exit);
+module_init(gs_mem_init);
+module_exit(gs_mem_exit);
