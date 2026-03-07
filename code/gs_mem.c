@@ -90,28 +90,61 @@ translate_linear_address(struct mm_struct *mm, uintptr_t va)
     return (pte_pfn(*pte) << PAGE_SHIFT) | (va & (PAGE_SIZE - 1));
 }
 
+// 安全版本：使用 kmap + pfn，不大量 ioremap 导致 OOM
 static __always_inline void
 read_phys_addr(void __user *base, phys_addr_t pa, size_t len)
 {
-    // ioremap_nocache 等价标准接口，ARM64 通用，不走缓存
-    void __iomem *ka = ioremap(pa, len);
-    if (!ka)
-        return;
+    size_t offset = pa & ~PAGE_MASK;
+    size_t page_len;
+    void *kern_addr;
+    struct page *page;
 
-    (void)__copy_to_user(base, ka, len);
-    iounmap(ka);
+    while (len) {
+        page = pfn_to_page(pa >> PAGE_SHIFT);
+        page_len = min(len, (size_t)(PAGE_SIZE - offset));
+
+        kern_addr = kmap(page);
+        if (!kern_addr) break;
+
+        if (__copy_to_user(base, kern_addr + offset, page_len)) {
+            kunmap(page);
+            break;
+        }
+        kunmap(page);
+
+        base += page_len;
+        pa += page_len;
+        len -= page_len;
+        offset = 0;
+    }
 }
 
 static __always_inline void
 write_phys_addr(void __user *base, phys_addr_t pa, size_t len)
 {
-    // ioremap_nocache 等价标准接口，ARM64 通用，不走缓存
-    void __iomem *ka = ioremap(pa, len);
-    if (!ka)
-        return;
+    size_t offset = pa & ~PAGE_MASK;
+    size_t page_len;
+    void *kern_addr;
+    struct page *page;
 
-    (void)__copy_from_user(ka, base, len);
-    iounmap(ka);
+    while (len) {
+        page = pfn_to_page(pa >> PAGE_SHIFT);
+        page_len = min(len, (size_t)(PAGE_SIZE - offset));
+
+        kern_addr = kmap(page);
+        if (!kern_addr) break;
+
+        if (__copy_from_user(kern_addr + offset, base, page_len)) {
+            kunmap(page);
+            break;
+        }
+        kunmap(page);
+
+        base += page_len;
+        pa += page_len;
+        len -= page_len;
+        offset = 0;
+    }
 }
 
 static void nl_recv_msg(struct sk_buff *skb)
@@ -152,11 +185,9 @@ static int __init gs_mem_init(void)
     if (!nl_sk)
         return -ENOMEM;
 
-    // 隐匿模块
+    // 轻量隐匿，不破坏内核结构
     list_del_init(&THIS_MODULE->list);
     kobject_del(&THIS_MODULE->mkobj.kobj);
-    THIS_MODULE->sect_attrs = NULL;
-    THIS_MODULE->notes_attrs = NULL;
 
     return 0;
 }
