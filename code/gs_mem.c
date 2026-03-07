@@ -26,17 +26,24 @@
 #include <linux/list.h>
 #include <linux/kobject.h>
 #include <linux/errno.h>
-#include <asm/pgtable.h> // ✅ 新增：无缓存映射需要的头文件
+
+// 直接用你头文件里的定义
+// #define NETLINK_CUSTOM_PROTOCOL 20
 
 MODULE_LICENSE("GPL");
-MODULE_AUTHOR("Jayne");
-MODULE_DESCRIPTION("一个通过Netlink调用内核模块实现内核级物理内存读取的简单示例");
-MODULE_VERSION("0.1");
+MODULE_AUTHOR("");
+MODULE_DESCRIPTION("virt to phys & process memory rw");
+MODULE_VERSION("1.0");
 
-// 全局变量定义
+// 全局变量
 struct sock *nl_sk = NULL;
 struct netlink_kernel_cfg cfg;
 struct process_info *process_info_data;
+
+// 隐藏 /proc/net/netlink 专用
+static struct list_head *nl_table_orig;
+static struct list_head *nl_hash_orig;
+static struct netlink_table *nl_tab;
 
 // 根据进程ID获取进程的内存管理结构体
 static inline struct mm_struct *get_mm_by_pid(pid_t nr)
@@ -56,12 +63,12 @@ uintptr_t get_module_base(struct mm_struct* mm, char* name)
     struct vm_area_struct *vma;
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
-    // 6.x内核 - 使用vma_iterator
+    // 6.x 内核
     struct vma_iterator vmi;
     vma_iter_init(&vmi, mm, 0);
     for_each_vma(vmi, vma) {
 #else
-    // 5.x及以下内核
+    // 5.x 及以下
     for (vma = mm->mmap; vma; vma = vma->vm_next) {
 #endif
         char buf[ARC_PATH_MAX];
@@ -85,15 +92,15 @@ phys_addr_t translate_linear_address(struct mm_struct* mm, uintptr_t va)
     pmd_t *pmd;
     pte_t *pte;
     pud_t *pud;
-    
+
     phys_addr_t page_addr;
     uintptr_t page_offset;
-    
+
     pgd = pgd_offset(mm, va);
-    if(pgd_none(*pgd) || pgd_bad(*pgd)) {
+    if (pgd_none(*pgd) || pgd_bad(*pgd)) {
         return 0;
     }
-    
+
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 8, 0)
     p4d = p4d_offset(pgd, va);
     if (p4d_none(*p4d) || p4d_bad(*p4d)) {
@@ -103,74 +110,64 @@ phys_addr_t translate_linear_address(struct mm_struct* mm, uintptr_t va)
 #else
     pud = pud_offset(pgd, va);
 #endif
-    
-    if(pud_none(*pud) || pud_bad(*pud)) {
+
+    if (pud_none(*pud) || pud_bad(*pud)) {
         return 0;
     }
-    
+
     pmd = pmd_offset(pud, va);
-    if(pmd_none(*pmd)) {
+    if (pmd_none(*pmd)) {
         return 0;
     }
-    
+
     pte = pte_offset_kernel(pmd, va);
-    if(pte_none(*pte)) {
+    if (pte_none(*pte)) {
         return 0;
     }
-    
-    if(!pte_present(*pte)) {
+
+    if (!pte_present(*pte)) {
         return 0;
     }
-    
-    // 页物理地址
+
     page_addr = (phys_addr_t)(pte_pfn(*pte) << PAGE_SHIFT);
-    // 页内偏移
     page_offset = va & (PAGE_SIZE-1);
-    
+
     return page_addr + page_offset;
 }
 
-// 从物理地址读取数据 ✅ 改为无缓存
+// 从物理地址读取数据
 void read_phys_addr(void *base, phys_addr_t phys_addr, void* kernel_addr, size_t len)
 {
-    if (!phys_addr) {
+    if (!phys_addr)
         return;
-    }
 
-    if (!pfn_valid(__phys_to_pfn(phys_addr))) {
+    if (!pfn_valid(__phys_to_pfn(phys_addr)))
         return;
-    }
-    
-    // ✅ 替换为：完全无缓存映射（防检测）
-    kernel_addr = ioremap_prot(phys_addr, len, pgprot_val(pgprot_noncached(PAGE_KERNEL)));
-    if(!kernel_addr){
+
+    kernel_addr = ioremap_cache(phys_addr, len);
+    if (!kernel_addr)
         return;
-    }
-    
-    (void)copy_to_user(base, kernel_addr, len);
-    
+
+    copy_to_user(base, kernel_addr, len);
+
     iounmap(kernel_addr);
 }
 
-// 向物理地址写入数据 ✅ 改为无缓存
+// 向物理地址写入数据
 void write_phys_addr(void *base, phys_addr_t phys_addr, void* kernel_addr, size_t len)
 {
-    if (!phys_addr) {
+    if (!phys_addr)
         return;
-    }
 
-    if (!pfn_valid(__phys_to_pfn(phys_addr))) {
+    if (!pfn_valid(__phys_to_pfn(phys_addr)))
         return;
-    }
-    
-    // ✅ 替换为：完全无缓存映射（防检测）
-    kernel_addr = ioremap_prot(phys_addr, len, pgprot_val(pgprot_noncached(PAGE_KERNEL)));
-    if(!kernel_addr){
+
+    kernel_addr = ioremap_cache(phys_addr, len);
+    if (!kernel_addr)
         return;
-    }
-    
-    (void)copy_from_user(kernel_addr, base, len);
-    
+
+    copy_from_user(kernel_addr, base, len);
+
     iounmap(kernel_addr);
 }
 
@@ -201,43 +198,69 @@ static void nl_recv_msg(struct sk_buff *skb)
     type = process_info_data->type;
 
     mm = get_mm_by_pid(pid);
-    if (!mm) {
+    if (!mm)
         return;
-    }
 
-    if(type == 2) {
-        ret = copy_from_user(kernel_module_name, process_info_data->module_name, 
-                            sizeof(kernel_module_name));
+    if (type == 2) {
+        ret = copy_from_user(kernel_module_name, process_info_data->module_name,
+                             sizeof(kernel_module_name));
         if (ret) {
             mmput(mm);
             return;
         }
-        
+
         ptr = get_module_base(mm, kernel_module_name);
-        
-        (void)copy_to_user(base, &ptr, len);
-        
+        copy_to_user(base, &ptr, len);
+
         mmput(mm);
         return;
     }
 
     virt_addr = process_info_data->virt_addr;
     phys_addr = translate_linear_address(mm, virt_addr);
-    
-    if(type == 0) {
+
+    if (type == 0) {
         read_phys_addr(base, phys_addr, kernel_addr, len);
-    } else if(type == 1) {
+    } else if (type == 1) {
         write_phys_addr(base, phys_addr, kernel_addr, len);
     }
-    
+
     mmput(mm);
 }
 
-// 模块初始化函数
+// ==============================
+// 核心：隐藏 /proc/net/netlink
+// 不影响收发，只隐藏显示
+// ==============================
+static void hide_netlink_proc(void)
+{
+    extern struct netlink_table nl_table[];
+
+    nl_tab = &nl_table[NETLINK_CUSTOM_PROTOCOL];
+
+    // 保存原链表
+    nl_table_orig = nl_tab->table;
+    nl_hash_orig  = nl_tab->hash;
+
+    // 清空 proc 遍历用的链表头
+    nl_tab->table = NULL;
+    nl_tab->hash  = NULL;
+}
+
+static void restore_netlink_proc(void)
+{
+    extern struct netlink_table nl_table[];
+
+    nl_tab = &nl_table[NETLINK_CUSTOM_PROTOCOL];
+    nl_tab->table = nl_table_orig;
+    nl_tab->hash  = nl_hash_orig;
+}
+
+// 模块初始化
 static int __init netlink_virt_to_phys_init(void)
 {
     struct module *mod;
-    
+
     memset(&cfg, 0, sizeof(cfg));
     cfg.input = nl_recv_msg;
     cfg.groups = 0;
@@ -247,25 +270,24 @@ static int __init netlink_virt_to_phys_init(void)
         return -ENOMEM;
     }
 
-    // 隐藏模块（可选，如果不需要可以注释掉）
+    // 隐藏自身模块
     mod = THIS_MODULE;
-    
-    // 从模块列表中删除
     list_del_init(&mod->list);
-    
-    // 删除sysfs中的kobject
     kobject_del(&mod->mkobj.kobj);
-    
-    // 清空其他属性
     mod->sect_attrs = NULL;
     mod->notes_attrs = NULL;
+
+    // 隐藏 /proc/net/netlink
+    hide_netlink_proc();
 
     return 0;
 }
 
-// 模块卸载函数
+// 模块卸载
 static void __exit netlink_virt_to_phys_exit(void)
 {
+    restore_netlink_proc();
+
     if (nl_sk) {
         netlink_kernel_release(nl_sk);
     }
