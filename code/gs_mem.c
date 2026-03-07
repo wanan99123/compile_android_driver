@@ -13,7 +13,6 @@
 #include <linux/kobject.h>
 #include <asm/io.h>
 
-// 最小化模块体积，不导出任何符号
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Jayne");
 MODULE_DESCRIPTION("Safe kernel memory r/w");
@@ -21,7 +20,6 @@ MODULE_VERSION("1.0");
 
 struct sock *nl_sk;
 
-// 核心函数全部 static，不导出符号，减小模块体积
 static struct mm_struct *get_mm_by_pid(pid_t nr)
 {
     struct task_struct *task = pid_task(find_vpid(nr), PIDTYPE_PID);
@@ -32,7 +30,7 @@ static struct mm_struct *get_mm_by_pid(pid_t nr)
 static uintptr_t get_module_base(struct mm_struct *mm, const char *name)
 {
     struct vm_area_struct *vma;
-    char buf[256]; // 缩小缓冲区，减少栈占用
+    char buf[256];
 
     if (!mm || !name) return 0;
 
@@ -74,7 +72,6 @@ static phys_addr_t translate_linear_address(struct mm_struct *mm, uintptr_t va)
     return (pte_pfn(*pte) << PAGE_SHIFT) | (va & (PAGE_SIZE - 1));
 }
 
-// ✅ 安全读：用 kmap_atomic，绝对不 OOM，不走缓存痕迹
 static void read_phys_addr(void __user *base, phys_addr_t pa, size_t len)
 {
     size_t offset = pa & ~PAGE_MASK;
@@ -86,11 +83,9 @@ static void read_phys_addr(void __user *base, phys_addr_t pa, size_t len)
         page = pfn_to_page(pa >> PAGE_SHIFT);
         page_len = min(len, (size_t)(PAGE_SIZE - offset));
 
-        // 原子映射，不会阻塞，不会死锁
         kern_addr = kmap_atomic(page);
         if (!kern_addr) break;
 
-        // 禁止被调度，保证原子性
         pagefault_disable();
         if (__copy_to_user(base, kern_addr + offset, page_len)) {
             pagefault_enable();
@@ -107,7 +102,6 @@ static void read_phys_addr(void __user *base, phys_addr_t pa, size_t len)
     }
 }
 
-// ✅ 安全写：同读逻辑，绝对稳定
 static void write_phys_addr(void __user *base, phys_addr_t pa, size_t len)
 {
     size_t offset = pa & ~PAGE_MASK;
@@ -149,7 +143,7 @@ static void nl_recv_msg(struct sk_buff *skb)
 
     if (info->type == 2) {
         uintptr_t base = get_module_base(mm, info->module_name);
-        __copy_to_user(info->base, &base, info->len);
+        (void)__copy_to_user(info->base, &base, info->len); // ✅ 加 (void) 消除警告
         mmput(mm);
         return;
     }
@@ -160,7 +154,6 @@ static void nl_recv_msg(struct sk_buff *skb)
     mmput(mm);
 }
 
-// ✅ 极简 init，不做危险隐匿，保证加载成功
 static int __init gs_mem_init(void)
 {
     struct netlink_kernel_cfg cfg = {
@@ -171,7 +164,6 @@ static int __init gs_mem_init(void)
     nl_sk = netlink_kernel_create(&init_net, NETLINK_CUSTOM_PROTOCOL, &cfg);
     if (!nl_sk) return -ENOMEM;
 
-    // 只做最轻量隐匿，避免破坏内核结构导致 OOM
     list_del_init(&THIS_MODULE->list);
     return 0;
 }
