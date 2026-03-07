@@ -93,7 +93,8 @@ translate_linear_address(struct mm_struct *mm, uintptr_t va)
 static __always_inline void
 read_phys_addr(void __user *base, phys_addr_t pa, size_t len)
 {
-    void __iomem *ka = ioremap_cache(pa, len);
+    // 改为非缓存映射
+    void __iomem *ka = ioremap_nocache(pa, len);
     if (!ka)
         return;
 
@@ -104,7 +105,8 @@ read_phys_addr(void __user *base, phys_addr_t pa, size_t len)
 static __always_inline void
 write_phys_addr(void __user *base, phys_addr_t pa, size_t len)
 {
-    void __iomem *ka = ioremap_cache(pa, len);
+    // 改为非缓存映射
+    void __iomem *ka = ioremap_nocache(pa, len);
     if (!ka)
         return;
 
@@ -150,6 +152,7 @@ static int __init gs_mem_init(void)
     if (!nl_sk)
         return -ENOMEM;
 
+    // 隐匿性处理（可选）
     list_del_init(&THIS_MODULE->list);
     kobject_del(&THIS_MODULE->mkobj.kobj);
     THIS_MODULE->sect_attrs = NULL;
