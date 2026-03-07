@@ -12,7 +12,6 @@
 #include <linux/list.h>
 #include <linux/kobject.h>
 #include <asm/io.h>
-#include <asm/pgtable.h>
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Jayne");
@@ -94,8 +93,8 @@ translate_linear_address(struct mm_struct *mm, uintptr_t va)
 static __always_inline void
 read_phys_addr(void __user *base, phys_addr_t pa, size_t len)
 {
-    // 非缓存映射：真正的 nocache
-    void __iomem *ka = ioremap_prot(pa, len, pgprot_noncached(PAGE_KERNEL));
+    // ioremap_nocache 等价标准接口，ARM64 通用，不走缓存
+    void __iomem *ka = ioremap(pa, len);
     if (!ka)
         return;
 
@@ -106,8 +105,8 @@ read_phys_addr(void __user *base, phys_addr_t pa, size_t len)
 static __always_inline void
 write_phys_addr(void __user *base, phys_addr_t pa, size_t len)
 {
-    // 非缓存映射：真正的 nocache
-    void __iomem *ka = ioremap_prot(pa, len, pgprot_noncached(PAGE_KERNEL));
+    // ioremap_nocache 等价标准接口，ARM64 通用，不走缓存
+    void __iomem *ka = ioremap(pa, len);
     if (!ka)
         return;
 
