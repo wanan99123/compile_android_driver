@@ -94,7 +94,7 @@ static __always_inline void
 read_phys_addr(void __user *base, phys_addr_t pa, size_t len)
 {
     // 改为非缓存映射
-    void __iomem *ka = ioremap_nocache(pa, len);
+    void __iomem *ka = ioremap(pa, len);
     if (!ka)
         return;
 
@@ -106,7 +106,7 @@ static __always_inline void
 write_phys_addr(void __user *base, phys_addr_t pa, size_t len)
 {
     // 改为非缓存映射
-    void __iomem *ka = ioremap_nocache(pa, len);
+    void __iomem *ka = ioremap(pa, len);
     if (!ka)
         return;
 
